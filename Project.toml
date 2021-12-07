@@ -1,0 +1,4 @@
+name = "MRFingerprinting"
+uuid = "9c9942f9-3442-44ee-8d65-6ff8274908fa"
+authors = ["Felix Horger <felix.horger@kcl.ac.uk>"]
+version = "0.1.0"
