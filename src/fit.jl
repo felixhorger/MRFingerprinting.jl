@@ -1,4 +1,5 @@
 
+# TODO: Add function to fit signals simultaneously, see 20220131_Scanning
 macro global_optimisation_run(search_range, lower, upper, initial)
 	esc(quote
 		R1 = 1 ./ reverse(T1)
@@ -61,6 +62,7 @@ function global_optimisation(
 	)
 
 	return 1 ./ result_blackbox, 1 ./ result_annealing
+	# TODO don't return T1 but R1
 end
 
 function global_optimisation(
