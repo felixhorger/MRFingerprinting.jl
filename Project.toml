@@ -1,11 +1,15 @@
+authors = ["Felix Horger <felix.horger@kcl.ac.uk>"]
 name = "MRFingerprinting"
 uuid = "9c9942f9-3442-44ee-8d65-6ff8274908fa"
-authors = ["Felix Horger <felix.horger@kcl.ac.uk>"]
 version = "0.1.0"
 
 [deps]
 BlackBoxOptim = "a134a8b2-14d6-55f6-9291-3336d3ab0209"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+LoopVectorization = "bdcacae8-1622-11e9-2a5c-532679323890"
 MRIEPG = "61811026-8928-4f8d-9711-35be4b9dd729"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+[extras]
+CPUSummary = "2a0fbf3d-bb9c-48f3-b0a9-814d99fd7ab9"
