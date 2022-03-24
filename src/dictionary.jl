@@ -117,8 +117,9 @@ function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Nu
 	i_max = length(params)
 	j_max = length(target)
 	while j <= j_max && i <= i_max
-		if params[p[i]] < target[j]
-			c[i] = j
+		k = p[i]
+		if params[k] < target[j]
+			c[k] = j
 			i += 1
 		else
 			j += 1
@@ -229,6 +230,6 @@ function match2maps(matches::AbstractVector{<: Integer}, parameters::NTuple{N, A
 end
 
 function unpack_parameters(map::AbstractVector{<: NTuple{N, <: Any}}) where N
-	ntuple( i -> [map[j][i] for j in eachindex(map)], 1:N )
+	ntuple( i -> [map[j][i] for j in eachindex(map)], N )
 end
 
