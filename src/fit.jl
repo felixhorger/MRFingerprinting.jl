@@ -116,6 +116,9 @@ end
 	# Apply to a
 	(a' * b) / (a' * a)
 end
+@inline function optimal_scale!(a::AbstractVector{<: Number}, b::AbstractVector{<: Number})
+	a .*= (a' * b) / (a' * a)
+end
 
 
 function eval_loss(
