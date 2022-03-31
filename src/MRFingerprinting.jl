@@ -6,7 +6,6 @@ module MRFingerprinting
 	using Statistics
 	import Optim
 	import BlackBoxOptim
-	import MRIEPG
 
 	include("fit.jl")
 	include("dictionary.jl")
