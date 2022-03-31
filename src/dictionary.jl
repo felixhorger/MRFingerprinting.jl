@@ -43,10 +43,11 @@ function energy_fraction(σ::AbstractVector{<: Number})
 end
 
 
-function match(D::AbstractMatrix{<: Number}, f::AbstractMatrix{<: Complex}, step::Integer)
-	# TODO: Write own matrix multiplication using LoopVectorization.jl
+function match(D::AbstractMatrix{<: Real}, f::AbstractMatrix{<: Complex}, step::Integer)
+	# TODO: Is it better to have whole dictionary and few fingerprints or a medium amount of both?
+	# In the first case, the algorithm is simpler, but in the second more can be done while keeping everything on the stack.
 	# Dictionary must be normalised
-	# This uses D * f to compute the overlap, take care that either D or f is conjugated!
+	# Dictionary must be real, so that offset phase is in f (this is always possible!)
 	# fingerprints f[time, fingerprint]
 	# dictionary D[fingerprint, time]
 
@@ -132,7 +133,7 @@ function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Nu
 end
 
 function match(
-	D::AbstractMatrix{<: Number},
+	D::AbstractMatrix{<: Real},
 	f::AbstractMatrix{<: Complex},
 	indices::AbstractVector{<: Integer},
 	stride::Integer,
@@ -176,7 +177,7 @@ function match(
 			end
 		end
 		num_subset_f == 0 && continue
-		# Do the matching for this subset
+		# Do the matching for this subset, iterate through vector "subset" in blocks of size "step"
 		fi_max = step
 		for i = 1:step:num_subset_f
 			if (i + step) > (num_subset_f + 1) # Moved the one from left to right
