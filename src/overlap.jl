@@ -1,4 +1,13 @@
 
+# Functions to work with LoopVectorzation and complex arrays
+function decomplexify(a::AbstractArray{C}) where C <: Complex
+	reshape(reinterpret(real(C), a), 2, size(a)...)
+end
+function recomplexify(a::AbstractArray{<: Real, N}, ac::AbstractArray{C, M}) where {C <: Complex, N, M}
+	@assert N == M + 1
+	reshape(reinterpret(C, a), size(a))
+end
+
 
 # Real
 @inline function overlap!(
@@ -18,10 +27,9 @@ end
 @inline function overlap!(
 	y::AbstractMatrix{<: Real},
 	A::AbstractMatrix{<: Real},
-	x::T,
-	z::T
-) where T <: AbstractMatrix{<: Real}
-
+	x::NTuple{2, <: AbstractMatrix{<: Real}}
+)
+	x, z = x
 	@turbo for ai in axes(A, 1), xi in axes(x, 2) 
 		v = 0.0
 		w = 0.0
@@ -55,11 +63,11 @@ end
 @inline function overlap!(
 	y::AbstractMatrix{<: Real},
 	A::AbstractMatrix{<: Real},
-	x::T,
-	z::T
-) where T <: AbstractArray{<: Real, 3}
-
-	@turbo for ai in axes(A, 1), xi in axes(x, 3)
+	x::NTuple{2, <: AbstractArray{<: Real, 3}}
+)
+	# No size assertions done!
+	x, z = x
+	 for ai in axes(A, 1), xi in axes(x, 3) # TODO: @turbo fails, see https://github.com/JuliaSIMD/LoopVectorization.jl/issues/365
 		v_real = 0.0
 		v_imag = 0.0
 		w_real = 0.0
@@ -72,7 +80,7 @@ end
 		end
 		y[ai, xi] = (
 			v_real^2 + v_imag^2						# ||ax||^2
-			+ 2 * (v_real*w_real + v_imag*w_imag2)	# 2Re{z^H a * a^H x}
+			+ 2 * (v_real*w_real + v_imag*w_imag)	# 2Re{z^H a * a^H x}
 			# where a is a row of A
 		)
 	end

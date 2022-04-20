@@ -10,9 +10,9 @@ module MRFingerprinting
 	import Optim
 	import BlackBoxOptim
 
+	include("overlap.jl")
 	include("fit.jl")
 	include("dictionary.jl")
-	include("overlap.jl")
 	include("matching.jl")
 	include("low_rank_recon.jl")
 

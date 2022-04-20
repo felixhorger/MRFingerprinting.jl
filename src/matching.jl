@@ -1,8 +1,12 @@
 
+"""
+	closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
+
+Find indices of values in `target` which are closest to arbitrarily valued parameters `params`.
+Note that `target` must be sorted in ascending order.
+
+"""
 function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
-	# Find indices of parameters of the dictionary which are closest to arbitrarily valued parameter (e.g measured)
-	# params: known parameters for each fingerprint
-	# target: parameters of the dictionary, must be sorted!
 	c = Vector{Int64}(undef, length(params))
 	p = sortperm(params)
 	i = 1
@@ -24,6 +28,14 @@ function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Nu
 	return c
 end
 
+
+"""
+	match2maps(matches::AbstractVector{<: Integer}, parameters::NTuple{N, AbstractVector}) where N
+
+Assign the respective parameter value from `parameters` corresponding to the matching index specified in `matches`.
+Returns a `Vector` of `Vector`s, one for each parameter.
+
+"""
 function match2maps(matches::AbstractVector{<: Integer}, parameters::NTuple{N, AbstractVector}) where N
 	# Start with inner most parameter
 	parameters_lengths = length.(parameters)
@@ -38,14 +50,26 @@ function match2maps(matches::AbstractVector{<: Integer}, parameters::NTuple{N, A
 	return maps
 end
 
+"""
+	unpack_parameters(map::AbstractVector{<: NTuple{N, <: Any}}) where N
+
+Unpack `Tuple`-like parameter maps, i.e. with parameter combinations, into maps of individual elements.
+
+"""
 function unpack_parameters(map::AbstractVector{<: NTuple{N, <: Any}}) where N
 	ntuple( i -> [map[j][i] for j in eachindex(map)], N )
 end
 
 
+"""
+	prepare_matching(D::AbstractMatrix{<: Real}, f::AbstractMatrix{<: C}) where C <: Complex
 
+Returns
+- `matches`
+- `match_overlap`
+- `fd`
 
-
+"""
 function prepare_matching(
 	D::AbstractMatrix{<: Real},
 	f::AbstractMatrix{<: C}
@@ -61,23 +85,21 @@ function prepare_matching(
 	match_overlap = zeros(Float64, num_f)
 
 	# Turn f into an array of two Reals per Complex
-	f_destruct = reshape(reinterpret(real(C), f), 2, size(f)...)
-	return matches, match_overlap, f_destruct
+	fd = decomplexify(f)
+	return matches, match_overlap, fd
 end
 function prepare_matching(
 	D::AbstractMatrix{<: Real},
-	v::NTuple{2, AbstractMatrix{<: C}}
-) where C <: Complex
-
+	v::NTuple{2, AbstractMatrix{<: Complex}}
+)
 	f, g = v
-	matches, overlap, match_overlap, f_destruct = prepare_matching(D, f)
+	matches, match_overlap, fd = prepare_matching(D, f)
 	@assert size(g) == size(f)
 	# Alike f, turn g also into an array of two Reals per Complex
-	g_destruct = reshape(reinterpret(real(C), g), 2, size(g)...)
+	gd = decomplexify(g)
 
-	return matches, match_overlap, (f_destruct, g_destruct)
+	return matches, match_overlap, (fd, gd)
 end
-
 function prepare_matching(f::AbstractMatrix{C}) where C <: Complex
 	Array{real(C), 3}(undef, 2, size(f, 1), size(f, 2))
 end
@@ -101,7 +123,7 @@ function prepare_matching(
 	stride::Integer
 ) where C <: Complex
 	f, g = v
-	subset, f_subset = prepare_matching(D, f, indices, stride)
+	f_subset, subset = prepare_matching(D, f, indices, stride)
 	g_subset = prepare_matching(f)
 	return (f_subset, g_subset), subset
 end
@@ -305,9 +327,9 @@ function match(
 	step::Integer
 )
 	# Returns matching indices and overlap
-	matches, match_overlap, v_destruct = prepare_matching(D, v)
+	matches, match_overlap, vd = prepare_matching(D, v)
 	overlap = Matrix{Float64}(undef, size(D, 1), step)
-	match!(matches, match_overlap, overlap, D, v_destruct, step)
+	match!(matches, match_overlap, overlap, D, vd, step)
 	return matches, match_overlap
 end
 
@@ -321,12 +343,12 @@ function match(
 	step::Integer
 )
 	# Check arguments, allocate memory, prepare arrays
-	matches, match_overlap, v_destruct = prepare_matching(D, v)
+	matches, match_overlap, vd = prepare_matching(D, v)
 	overlap = Matrix{Float64}(undef, stride, step)
 	v_subset, subset = prepare_matching(D, v, indices, stride)
 	match!(
 		matches, match_overlap, overlap, v_subset, subset,
-		D, v_destruct,
+		D, vd,
 		indices, stride, step
 	)
 	return matches, match_overlap
