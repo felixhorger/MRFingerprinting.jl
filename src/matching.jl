@@ -262,7 +262,7 @@ end
 			f_subset[:, :, this_step] .= f[:, :, this_f_indices]
 			g_subset[:, :, this_step] .= g[:, :, this_f_indices]
 		end
-		args = :(f[:, :, this_step], g[:, :, this_step])
+		args = :(f_subset[:, :, this_step], g_subset[:, :, this_step])
 	end
 
 	return quote

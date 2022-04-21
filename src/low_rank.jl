@@ -280,7 +280,7 @@ function admm(
 		# x
 		x = cg(Ar, b, maxiter=1024)
 		# P
-		matches .= find_matches(x, y)
+		matches .= find_matches(x, y) # This takes long (overlap!()), need AVX or GPU
 		# P is updated because it has pointer to `matches`
 		# TODO asymmetric overlap remember Dx to use below
 		# y

@@ -64,10 +64,12 @@ end
 	y::AbstractMatrix{<: Real},
 	A::AbstractMatrix{<: Real},
 	x::NTuple{2, <: AbstractArray{<: Real, 3}}
+	# TODO: @turbo sometimes fails if this is view, see https://github.com/JuliaSIMD/LoopVectorization.jl/issues/365
+	# But maybe it requires a strided array. TODO: Adjust type accordingly
 )
 	# No size assertions done!
 	x, z = x
-	 for ai in axes(A, 1), xi in axes(x, 3) # TODO: @turbo fails, see https://github.com/JuliaSIMD/LoopVectorization.jl/issues/365
+	@turbo for ai in axes(A, 1), xi in axes(x, 3)
 		v_real = 0.0
 		v_imag = 0.0
 		w_real = 0.0

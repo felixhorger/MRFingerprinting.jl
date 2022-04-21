@@ -14,7 +14,7 @@ module MRFingerprinting
 	include("fit.jl")
 	include("dictionary.jl")
 	include("matching.jl")
-	include("low_rank_recon.jl")
+	include("low_rank.jl")
 
 end
 
