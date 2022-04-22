@@ -10,6 +10,8 @@ function sparse2dense(a::AbstractVector{<: Number}, timepoints::Integer, indices
 	end
 	return b
 end
+# TODO: Function from indices (above) to lr representation, picking out elements from VT/Vconj, simple for-loop will do
+# This should then be used also in the function below
 
 function low_rank_mask(mask::AbstractArray{<: Number, N}, V::AbstractMatrix{<: T}, VH::AbstractMatrix{<: T}) where {T, N}
 	# mask[space, time]
@@ -258,7 +260,7 @@ function plan_lr2lr_regularised(x::AbstractArray{<: Complex}, A::LinearMap, P::L
 end
 
 function admm(
-	s::AbstractVector{<: Complex}, # vec([spatial dimensions, time])
+	b::AbstractVector{<: Complex}, # vec([spatial dimensions, time])
 	L::LinearMap, # lr2kt
 	A::LinearMap, # lr2lr
 	Ar::LinearMap, # lr2lr regularised
@@ -269,16 +271,15 @@ function admm(
 )
 	# Do it specialised for MRF because P is not Vector in the implementation, but mathematically it is
 	# See Boyd2010
-	backprojection = L' * s
-	x = cg(A, backprojection, maxiter=64) # Initial value is computed from standard low-rank reconstruction,
+	x = cg(A, b, maxiter=64) # Initial value is computed from standard low-rank reconstruction,
 	# TODO: above, how many iterations since noise amplification?
 	y = zeros(ComplexF64, length(x))
-	b = Vector{ComplexF64}(undef, length(x))
+	br = Vector{ComplexF64}(undef, length(x))
 	for i = 1:maxiter
 		# Construct right hand side of normal equations
-		b .= backprojection .- y .+ P*y
+		br .= b .- y .+ P*y
 		# x
-		x = cg(Ar, b, maxiter=1024)
+		x = cg(Ar, br, maxiter=1024)
 		# P
 		matches .= find_matches(x, y) # This takes long (overlap!()), need AVX or GPU
 		# P is updated because it has pointer to `matches`
