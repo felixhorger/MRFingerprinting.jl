@@ -72,7 +72,8 @@ Returns
 """
 function prepare_matching(
 	D::AbstractMatrix{<: Real},
-	f::AbstractMatrix{<: C}
+	f::AbstractMatrix{<: C},
+	step::Integer
 ) where C <: Complex
 	# Check arguments
 	num_D = size(D, 1)
@@ -90,41 +91,43 @@ function prepare_matching(
 end
 function prepare_matching(
 	D::AbstractMatrix{<: Real},
-	v::NTuple{2, AbstractMatrix{<: Complex}}
+	v::NTuple{2, AbstractMatrix{<: Complex}},
+	step::Integer
 )
 	f, g = v
-	matches, match_overlap, fd = prepare_matching(D, f)
+	matches, match_overlap, fd = prepare_matching(D, f, step)
 	@assert size(g) == size(f)
 	# Alike f, turn g also into an array of two Reals per Complex
 	gd = decomplexify(g)
 
 	return matches, match_overlap, (fd, gd)
 end
-function prepare_matching(f::AbstractMatrix{C}) where C <: Complex
-	Array{real(C), 3}(undef, 2, size(f, 1), size(f, 2))
-end
+
+# With known parameters
 # Note: the type and dimension checks are performed in the above prepare_matching used for full dictionary matching
 function prepare_matching(
 	D::AbstractMatrix{<: Real},
 	f::AbstractMatrix{C},
 	indices::AbstractVector{<: Integer},
-	stride::Integer
+	stride::Integer,
+	step::Integer
 ) where C <: Complex
 	@assert all(1 .<= indices .<= size(D, 1) ÷ stride)
 	@assert length(indices) == size(f, 2)
 	subset = Vector{Int64}(undef, size(f, 2))
-	f_subset = prepare_matching(f)
+	f_subset = Array{real(C), 3}(undef, 2, size(f, 1), step)
 	return f_subset, subset
 end
 function prepare_matching(
 	D::AbstractMatrix{<: Real},
 	v::NTuple{2, AbstractMatrix{C}},
 	indices::AbstractVector{<: Integer},
-	stride::Integer
+	stride::Integer,
+	step::Integer
 ) where C <: Complex
 	f, g = v
-	f_subset, subset = prepare_matching(D, f, indices, stride)
-	g_subset = prepare_matching(f)
+	f_subset, subset = prepare_matching(D, f, indices, stride, step)
+	g_subset = Array{real(C), 3}(undef, 2, size(g, 1), step)
 	return (f_subset, g_subset), subset
 end
 
@@ -135,7 +138,7 @@ function find_maximum_overlap!(
 	match_overlap::AbstractVector{<: Real}, # Values of the overlap
 	overlap::AbstractMatrix{<: Real},
 	f_indices::AbstractVector{<: Integer},
-	d0::Integer=0
+	d0::Integer
 )
 	@inbounds for (i, fi) in enumerate(f_indices)
 		# iterate fingerprints in d
@@ -194,7 +197,20 @@ end
 =#
 
 # Helpers for matching with a whole dictionary
-@generated function match!(
+@inline @views function select_fingerprints(
+	f::AbstractArray{<: Real, 3},
+	indices::AbstractVector{<: Integer}
+)
+	f[:, :, indices]
+end
+@inline @views function select_fingerprints(
+	v::NTuple{2, AbstractArray{<: Real, 3}},
+	indices::AbstractVector{<: Integer}
+)
+	f, g = v
+	(f[:, :, indices], g[:, :, indices])
+end
+function match!(
 	matches::AbstractVector{<: Integer},	# Modified
 	match_overlap::AbstractVector{<: Real}, # |
 	overlap::AbstractMatrix{<: Real}, 		# |
@@ -202,35 +218,41 @@ end
 	v::Union{AbstractArray{<: Real, 3}, NTuple{2, AbstractArray{<: Real, 3}}},
 	step::Integer
 )
-	if v <: AbstractArray{<: Real, 3}
-		# only f
-		expand_v = :(f = v)
-		args = :(f[:, :, i:fi_max+i-1])
-	else
-		# f and g
-		expand_v = :(f, g = v)
-		args = :(f[:, :, f_indices], g[:, :, f_indices])
-	end
-
-	return quote
-		$expand_v
-		num_f = size(f, 3)
-		fi_max = step
-		@inbounds @views for i = 1:step:num_f
-			if (i + step) > (num_f + 1) # Moved the one from left to right
-				fi_max = num_f - i + 1
-			end
-			f_indices = i:fi_max+i-1
-			overlap!(overlap, D, $args)
-			find_maximum_overlap!(matches, match_overlap, overlap, f_indices)
+	num_f = length(matches)
+	fi_max = step
+	@inbounds @views for i = 1:step:num_f
+		if (i + step) > (num_f + 1) # Moved the one from left to right
+			fi_max = num_f - i + 1
 		end
-		return
+		f_indices = i:fi_max+i-1
+		overlap!(overlap, D, select_fingerprints(v, f_indices))
+		find_maximum_overlap!(matches, match_overlap, overlap, f_indices, 0) # No offset in dictionary
 	end
+	return
 end
 
 
 # Helpers for matching where fingerprints are randomly extracted from f (or g)
-@generated function match!(
+@inline @views function copy_fingerprints!(
+	f_subset::AbstractArray{<: Real, 3},
+	f::AbstractArray{<: Real, 3},
+	indices::AbstractVector{<: Integer}
+)
+	f_subset .= f[:, :, indices]
+	return
+end
+@inline @views function copy_fingerprints!(
+	v_subset::NTuple{2, AbstractArray{<: Real, 3}},
+	v::NTuple{2, AbstractArray{<: Real, 3}},
+	indices::AbstractVector{<: Integer}
+)
+	f, g = v
+	f_subset, g_subset = v_subset
+	copy_fingerprints!(f_subset, f, indices)
+	copy_fingerprints!(g_subset, g, indices)
+	return
+end
+function match!(
 	matches::AbstractVector{<: Integer},	# Modified
 	match_overlap::AbstractVector{<: Real},
 	overlap::AbstractMatrix{<: Real},
@@ -241,46 +263,21 @@ end
 	step::Integer,
 	d0::Integer
 )
+	@assert typeof(v_subset) <: Tuple ? (typeof(v) <: Tuple) : true
 
-	if v <: AbstractArray{<: Real, 3}
-		# only f
-		@assert v_subset <: AbstractArray{<: Real, 3}
-		expand_v = quote
-			f = v
-			f_subset = v_subset
+	num_f = length(f_indices)
+	fi_max = step
+	@inbounds @views for i = 1:step:num_f
+		if (i + step) > (num_f + 1) # Moved the one from left to right
+			fi_max = num_f - i + 1
 		end
-		extract_f = :(f_subset[:, :, this_step] .= f[:, :, this_f_indices])
-		args = :(f_subset[:, :, this_step])
-	else
-		# f and g
-		@assert v_subset <: NTuple{2, AbstractArray{<: Real, 3}}
-		expand_v = quote
-			f, g = v
-			f_subset, g_subset = v_subset
-		end
-		extract_f = quote
-			f_subset[:, :, this_step] .= f[:, :, this_f_indices]
-			g_subset[:, :, this_step] .= g[:, :, this_f_indices]
-		end
-		args = :(f_subset[:, :, this_step], g_subset[:, :, this_step])
+		this_step = i:fi_max+i-1
+		this_f_indices = f_indices[this_step]
+		copy_fingerprints!(v_subset, v, this_f_indices)
+		overlap!(overlap, D, v_subset)
+		find_maximum_overlap!(matches, match_overlap, overlap, this_f_indices, d0)
 	end
-
-	return quote
-		$expand_v
-		num_f = length(f_indices)
-		fi_max = step
-		@inbounds @views for i = 1:step:num_f
-			if (i + step) > (num_f + 1) # Moved the one from left to right
-				fi_max = num_f - i + 1
-			end
-			this_step = i:fi_max+i-1
-			this_f_indices = f_indices[this_step]
-			$extract_f
-			overlap!(overlap, D, $args)
-			find_maximum_overlap!(matches, match_overlap, overlap, this_f_indices, d0)
-		end
-		return
-	end
+	return
 end
 
 # The for loop over sub-dictionaries
@@ -310,7 +307,8 @@ function match!(
 
 		@views match!(
 			matches, match_overlap, overlap, v_subset,
-			D[s:s+stride-1, :], v,
+			D[s:s+stride-1, :],
+			v,
 			subset[1:num_subset_f],
 			step,
 			s-1
@@ -327,7 +325,7 @@ function match(
 	step::Integer
 )
 	# Returns matching indices and overlap
-	matches, match_overlap, vd = prepare_matching(D, v)
+	matches, match_overlap, vd = prepare_matching(D, v, step)
 	overlap = Matrix{Float64}(undef, size(D, 1), step)
 	match!(matches, match_overlap, overlap, D, vd, step)
 	return matches, match_overlap
@@ -343,9 +341,9 @@ function match(
 	step::Integer
 )
 	# Check arguments, allocate memory, prepare arrays
-	matches, match_overlap, vd = prepare_matching(D, v)
+	matches, match_overlap, vd = prepare_matching(D, v, step)
 	overlap = Matrix{Float64}(undef, stride, step)
-	v_subset, subset = prepare_matching(D, v, indices, stride)
+	v_subset, subset = prepare_matching(D, v, indices, stride, step)
 	match!(
 		matches, match_overlap, overlap, v_subset, subset,
 		D, vd,

@@ -261,7 +261,6 @@ end
 
 function admm(
 	b::AbstractVector{<: Complex}, # vec([spatial dimensions, time])
-	L::LinearMap, # lr2kt
 	A::LinearMap, # lr2lr
 	Ar::LinearMap, # lr2lr regularised
 	P::LinearMap,
@@ -281,9 +280,8 @@ function admm(
 		# x
 		x = cg(Ar, br, maxiter=1024)
 		# P
-		matches .= find_matches(x, y) # This takes long (overlap!()), need AVX or GPU
+		matches .= find_matches(x, y)
 		# P is updated because it has pointer to `matches`
-		# TODO asymmetric overlap remember Dx to use below
 		# y
 		y .+= x - P*x
 		# TODO: Stopping criteria, check Asslander's code
