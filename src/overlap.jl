@@ -1,11 +1,11 @@
 
 # Functions to work with LoopVectorzation and complex arrays
 function decomplexify(a::AbstractArray{C}) where C <: Complex
-	reshape(reinterpret(real(C), a), 2, size(a)...)
+	reinterpret(reshape, real(C), a)
 end
-function recomplexify(a::AbstractArray{<: Real, N}, ac::AbstractArray{C, M}) where {C <: Complex, N, M}
-	@assert N == M + 1
-	reshape(reinterpret(C, a), size(a))
+function recomplexify(a::AbstractArray{R, N}) where {R <: Real, N}
+	@assert N > 1
+	reinterpret(reshape, Complex{R}, a)
 end
 
 
