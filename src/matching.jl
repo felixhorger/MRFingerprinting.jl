@@ -62,7 +62,7 @@ end
 
 
 """
-	prepare_matching(D::AbstractMatrix{<: Real}, f::AbstractMatrix{<: C}) where C <: Complex
+	prepare_matching(D::AbstractMatrix{<: Number}, f::AbstractMatrix{<: C}) where C <: Complex
 
 Returns
 - `matches`
@@ -71,7 +71,7 @@ Returns
 
 """
 function prepare_matching(
-	D::AbstractMatrix{<: Real},
+	D::AbstractMatrix{<: Number},
 	f::AbstractMatrix{<: C},
 	step::Integer
 ) where C <: Complex
@@ -90,7 +90,7 @@ function prepare_matching(
 	return matches, match_overlap, fd
 end
 function prepare_matching(
-	D::AbstractMatrix{<: Real},
+	D::AbstractMatrix{<: Number},
 	v::NTuple{2, AbstractMatrix{<: Complex}},
 	step::Integer
 )
@@ -106,7 +106,7 @@ end
 # With known parameters
 # Note: the type and dimension checks are performed in the above prepare_matching used for full dictionary matching
 function prepare_matching(
-	D::AbstractMatrix{<: Real},
+	D::AbstractMatrix{<: Number},
 	f::AbstractMatrix{C},
 	indices::AbstractVector{<: Integer},
 	stride::Integer,
@@ -119,7 +119,7 @@ function prepare_matching(
 	return f_subset, subset
 end
 function prepare_matching(
-	D::AbstractMatrix{<: Real},
+	D::AbstractMatrix{<: Number},
 	v::NTuple{2, AbstractMatrix{C}},
 	indices::AbstractVector{<: Integer},
 	stride::Integer,
@@ -214,7 +214,7 @@ function match!(
 	matches::AbstractVector{<: Integer},	# Modified
 	match_overlap::AbstractVector{<: Real}, # |
 	overlap::AbstractMatrix{<: Real}, 		# |
-	D::AbstractMatrix{<: Real},
+	D::Union{AbstractMatrix{<: Real}, AbstractArray{<: Real, 3}},
 	v::Union{AbstractArray{<: Real, 3}, NTuple{2, AbstractArray{<: Real, 3}}},
 	step::Integer
 )
@@ -257,7 +257,7 @@ function match!(
 	match_overlap::AbstractVector{<: Real},
 	overlap::AbstractMatrix{<: Real},
 	v_subset::Union{AbstractArray{<: Real, 3}, NTuple{2, AbstractArray{<: Real, 3}}}, # up to here incl.
-	D::AbstractMatrix{<: Real},
+	D::Union{AbstractMatrix{<: Real}, AbstractArray{<: Real, 3}},
 	v::Union{AbstractArray{<: Real, 3}, NTuple{2, AbstractArray{<: Real, 3}}},
 	f_indices::AbstractVector{<: Integer},
 	step::Integer,
@@ -287,7 +287,7 @@ function match!(
 	overlap::AbstractMatrix{<: Real},
 	v_subset::Union{AbstractArray{<: Real, 3}, NTuple{2, AbstractArray{<: Real, 3}}},
 	subset::AbstractVector{<: Integer}, # up to here incl.
-	D::AbstractMatrix{<: Real},
+	D::Union{AbstractMatrix{<: Real}, AbstractArray{<: Real, 3}},
 	v::Union{AbstractArray{<: Real, 3}, NTuple{2, AbstractArray{<: Real, 3}}},
 	indices::AbstractVector{<: Integer}, # Known parameter indices
 	stride::Integer,
@@ -318,15 +318,21 @@ function match!(
 end
 
 
+# For supporting both real and complex dictionaries
+@inline decomplexify_dictionary(D::AbstractMatrix{<: Real}) = D
+@inline decomplexify_dictionary(D::AbstractMatrix{<: Complex}) = decomplexify(D)
+
+
 # Full dictionary matching
 function match(
-	D::AbstractMatrix{<: Real},
+	D::AbstractMatrix{<: Number},
 	v::Union{AbstractArray{<: Complex}, NTuple{2, AbstractArray{<: Complex}}},
 	step::Integer
 )
 	# Returns matching indices and overlap
 	matches, match_overlap, vd = prepare_matching(D, v, step)
 	overlap = Matrix{Float64}(undef, size(D, 1), step)
+	D = decomplexify_dictionary(D)
 	match!(matches, match_overlap, overlap, D, vd, step)
 	return matches, match_overlap
 end
@@ -334,7 +340,7 @@ end
 
 # Sub-dictionary matching
 function match(
-	D::AbstractMatrix{<: Real},
+	D::AbstractMatrix{<: Number},
 	v::Union{AbstractMatrix{<: Complex}, NTuple{2, AbstractArray{<: Complex}}},
 	indices::AbstractVector{<: Integer},
 	stride::Integer,
@@ -344,6 +350,7 @@ function match(
 	matches, match_overlap, vd = prepare_matching(D, v, step)
 	overlap = Matrix{Float64}(undef, stride, step)
 	v_subset, subset = prepare_matching(D, v, indices, stride, step)
+	D = decomplexify_dictionary(D)
 	match!(
 		matches, match_overlap, overlap, v_subset, subset,
 		D, vd,

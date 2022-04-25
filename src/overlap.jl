@@ -9,7 +9,7 @@ function recomplexify(a::AbstractArray{R, N}) where {R <: Real, N}
 end
 
 
-# Real
+# Real dictionary and real fingerprints
 @inline function overlap!(
 	y::AbstractMatrix{<: Real},
 	A::AbstractMatrix{<: Real},
@@ -42,7 +42,7 @@ end
 	return
 end
 
-# Complex
+# Real dictionary and complex fingerprints
 @inline function overlap!(
 	y::AbstractMatrix{<: Real},
 	A::AbstractMatrix{<: Real},
@@ -84,6 +84,55 @@ end
 			v_real^2 + v_imag^2						# ||ax||^2
 			+ 2 * (v_real*w_real + v_imag*w_imag)	# 2Re{z^H a * a^H x}
 			# where a is a row of A
+		)
+	end
+	return
+end
+
+
+
+# Complex dictionary and complex fingerprints
+@inline function overlap!(
+	y::AbstractMatrix{<: Real},
+	A::AbstractArray{<: Real, 3}, # Rows of A are conjugated below
+	x::AbstractArray{<: Real, 3}
+)
+	# Mind the axis!
+	@turbo for ai in axes(A, 2), xi in axes(x, 3) # Make this loop structure a macro, then make several functions replacing the inner part
+		v_real = 0.0
+		v_imag = 0.0
+		for j in axes(A, 3)
+			v_real += A[1, ai, j] * x[1, j, xi] + A[2, ai, j] * x[2, j, xi]
+			v_imag += A[1, ai, j] * x[2, j, xi] - A[2, ai, j] * x[1, j, xi]
+		end
+		y[ai, xi] = v_real^2 + v_imag^2
+	end
+	return
+end
+
+@inline function overlap!(
+	y::AbstractMatrix{<: Real},
+	A::AbstractArray{<: Real, 3},
+	x::NTuple{2, <: AbstractArray{<: Real, 3}}
+	# TODO: @turbo sometimes fails if this is view, see https://github.com/JuliaSIMD/LoopVectorization.jl/issues/365
+	# But maybe it requires a strided array. TODO: Adjust type accordingly
+)
+	# No size assertions done!
+	x, z = x
+	@turbo for ai in axes(A, 2), xi in axes(x, 3)
+		v_real = 0.0
+		v_imag = 0.0
+		w_real = 0.0
+		w_imag = 0.0
+		for j in axes(A, 3)
+			v_real += A[1, ai, j] * x[1, j, xi] + A[2, ai, j] * x[2, j, xi]
+			v_imag += A[1, ai, j] * x[2, j, xi] - A[2, ai, j] * x[1, j, xi]
+			w_real += A[1, ai, j] * z[1, j, xi] + A[2, ai, j] * z[2, j, xi]
+			w_imag += A[1, ai, j] * z[2, j, xi] - A[2, ai, j] * z[1, j, xi]
+		end
+		y[ai, xi] = (
+			v_real^2 + v_imag^2						# ||a^H x||^2
+			+ 2 * (v_real*w_real + v_imag*w_imag)	# 2Re{z^H a * a^H x} where a is a row of A
 		)
 	end
 	return
