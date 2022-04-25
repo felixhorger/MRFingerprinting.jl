@@ -1,7 +1,7 @@
 
 function normalise(D::AbstractMatrix{<: Number})::Tuple{AbstractMatrix{<: Number}, Vector{Float64}}
 	# Axes: D[fingerprint, time]
-	norms = sqrt.(dropdims(sum(conj.(D) .* D; dims=2); dims=2))
+	norms = sqrt.(dropdims(sum(abs2, D; dims=2); dims=2))
 	D ./= norms
 	return D, norms
 end
@@ -11,23 +11,23 @@ function compress(D::AbstractMatrix{<: Number})::Tuple{Matrix{<: Number}, Vector
 	# Returns:
 	# compressed_dictionary[fingerprint, singular_component]
 	# singular values σ
-	# transformation matrix V^h[singular_component, time]
+	# transformation matrix V^H[singular_component, time]
 	F = svd(D)
 	return F.U * diagm(F.S), F.S, F.Vt
 end
 
-function compression_error(D::AbstractMatrix{<: Number}, Vh::AbstractMatrix{<: Number})::Vector{Float64}
+function compression_error(D::AbstractMatrix{<: Number}, VH::AbstractMatrix{<: Number})::Vector{Float64}
 	# Dictionary must be normalised
 	# Axes:
 	# D[fingerprint, time]
-	# Vh[singular component, time]
-	# Singular components must be selected before passing Vh to this function
+	# VH[singular component, time]
+	# Singular components must be selected before passing VH to this function
 
 	# Project there and back again (an expected journey)
-	D_approx = *(D, Vh', Vh) # This picks the most efficient order of multiplication
+	D_approx = *(D, VH', VH) # This picks the most efficient order of multiplication
 	# Compute sum of squares error
 	error = D_approx .- D
-	return sqrt.( sum(conj.(error) .* error; dims=2) )
+	return sqrt.( sum(abs2, error; dims=2) )
 end
 
 function overlap(D::AbstractMatrix{<: Number})::Real
