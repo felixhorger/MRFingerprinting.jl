@@ -1,12 +1,15 @@
 
 # Functions to work with LoopVectorzation and complex arrays
-function decomplexify(a::AbstractArray{C}) where C <: Complex
+@inline function decomplexify(a::AbstractArray{C}) where C <: Complex
 	reinterpret(reshape, real(C), a)
 end
-function recomplexify(a::AbstractArray{R, N}) where {R <: Real, N}
+@inline decomplexify(a::AbstractArray{<: Real}) = a
+
+@inline function recomplexify(a::AbstractArray{R, N}) where {R <: Real, N}
 	@assert N > 1
 	reinterpret(reshape, Complex{R}, a)
 end
+
 
 
 # Real dictionary and real fingerprints
