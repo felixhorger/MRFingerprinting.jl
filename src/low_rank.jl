@@ -4,9 +4,9 @@
 
 function sparse2dense(a::AbstractVector{<: Number}, timepoints::Integer, indices::AbstractVector{<: Integer}...) where N
 	@assert all(length(a) .== length.(indices))
-	b = zeros(eltype(a), maximum.(indices)..., timepoints)
+	b = zeros(eltype(a), timepoints, maximum.(indices)...)
 	for (i, j) in enumerate(zip(indices...))
-		b[j..., mod1(i, timepoints)] = a[i]
+		b[mod1(i, timepoints), j...] = a[i]
 	end
 	return b
 end
@@ -14,17 +14,17 @@ end
 # This should then be used also in the function below
 
 function low_rank_mask(mask::AbstractArray{<: Number, N}, V::AbstractMatrix{<: T}, VH::AbstractMatrix{<: T}) where {T, N}
-	# mask[space, time]
+	# mask[time, space]
 	# V[time, singular component]
 	#=
 		For each voxel, mask singular vectors in V,
 		then do inner product with vectors in VH to form one matrix per voxel,
 		transforming signals from the temporal low-rank domain into itself.
 	=#
-	shape = size(mask)[1:N-1]
-	lr_mask = Array{T}(undef, shape..., size(VH, 1), size(VH, 1))
+	shape = size(mask)[2:N]
+	lr_mask = Array{T}(undef, size(VH, 1), size(VH, 1), shape...)
 	@views for I in CartesianIndices(shape)
-		lr_mask[I, :, :] = VH * (mask[I, :] .* V)
+		lr_mask[:, :, I] = VH * (mask[:, I] .* V)
 	end
 	return lr_mask
 end
@@ -35,20 +35,11 @@ function convenient_Vs(VH::AbstractMatrix{<: Number})
 	transpose(VH), conj.(VH)
 end
 
-function spatial_vol2vec(x::AbstractArray{<: Number, N}) where N
-	# x[space..., time]
-	reshape(x, :, size(x, N))
-end
-function spatial_vec2vol(x::AbstractMatrix{<: Number}, shape::NTuple{N, Int64}) where N
-	# x[space, time]
-	# shape is spatial dimensions
-	reshape(x, shape..., size(x, 2))
-end
-
 # Get the corresponding operator
 function plan_spatial_ft(x::AbstractArray{<: Number, N}) where N
+	# x[spatial dimensions..., channels, singular components]
 	# Pay attention that they have to be applied in pairs! Otherwise scaling
-	FFT = plan_fft(x, 1:N-1)
+	FFT = plan_fft(x, 1:N-2)
 	FFTH = inv(FFT)
 	shape = size(x)
 	restore_shape(x) = reshape(x, shape) # Note that x is Vector
@@ -68,41 +59,64 @@ function plan_spatial_ft(x::AbstractArray{<: Number, N}) where N
 	return F
 end
 
-# TODO: Need non-allocating version, one memory block for each representation? check cg()
-function lr2time(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) where N
-	# TODO: This could be done with @turbo
-	shape = size(x)
-	x = reshape(x, :, shape[N])
-	xt = x * VT
-	xt = reshape(xt, shape[1:N-1]..., size(VT, 2))
-	return xt
-end
-function time2lr(xt::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}) where N
-	# TODO: This could be done with @turbo
-	shape = size(xt)
-	xt = reshape(xt, :, shape[N])
-	x = xt * V_conj
-	x = reshape(x, shape[1:N-1]..., size(V_conj, 2))
-	return x
-end
-function lr2kt(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) where N
-	y = fft(x, 1:N-1)
-	lr2time(x, VT)
-	return yt
-end
-function kt2lr(yt::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}) where N
-	time2lr(yt, V_conj)
-	y = ifft(yt, 1:N-1)
-	return y
+
+
+"""
+	plan_sensitivities(sensitivities::Union{AbstractMatrix{<: Number}, AbstractArray{<: Number, 3}}) = S
+
+x[spatial dimensions..., channels, singular components]
+sensitivities[spatial dimensions..., channels]
+
+"""
+function plan_sensitivities(
+	x::AbstractArray{<: Number, N},
+	sensitivities::AbstractArray{<: Number, M}
+) where {N,M}
+	@assert N == M + 1
+
+	# Get dimensions
+	# TODO: check spatial dims
+	num_σ = size(x, N)
+	shape = size(sensitivities)
+	spatial_dimensions = prod(shape[1:end-1])
+	channels = shape[end]
+	input_dimension = spatial_dimensions * num_σ
+	output_dimension = input_dimension * channels
+
+	# Reshape
+	sensitivities = reshape(sensitivities, spatial_dimensions, channels, 1)
+	conj_sensitivities = conj.(sensitivities)
+
+	S = LinearMap{ComplexF64}(
+		x::AbstractVector{<: Complex} -> begin
+			Sx = sensitivities .* reshape(x, spatial_dimensions, 1, num_σ)
+			vec(Sx)
+		end,
+		y::AbstractVector{<: Complex} -> begin
+			y = reshape(y, spatial_dimensions, channels, num_σ)
+			SHy = sum(conj_sensitivities .* y; dims=2)
+			vec(SHy)
+		end,
+		output_dimension, input_dimension
+	)
+	return S
 end
 
+
+
+"""
+	plan_lr2time(x::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: Number}) where N
+
+x[spatial dimensions..., channels, singular components]
+
+"""
 function plan_lr2time(x::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: Number}) where N
 	# TODO: This could be done with @turbo
 	time, num_σ = size(V_conj)
-	spatial_dimensions = prod(size(x)[1:N-1])
+	spatial_dimensions = prod(size(x)[1:N-1]) # Includes channels if present
 	input_dimension = num_σ * spatial_dimensions 
 	output_dimension = time * spatial_dimensions
-	L = LinearMap{ComplexF64}(
+	Λ = LinearMap{ComplexF64}(
 		y -> begin
 			y = reshape(y, :, num_σ)
 			yt = y * VT
@@ -116,98 +130,136 @@ function plan_lr2time(x::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: 
 		output_dimension,
 		input_dimension
 	)
-	return L
+	return Λ
 end
 
-function plan_lr2kt(
-	x::AbstractArray{<: Number, N},
-	V_conj::AbstractMatrix{<: Number},
-	VT::AbstractMatrix{<: Number},
-) where N
-	# TODO: might make sense to preallocate an intermediate state?
-	F = plan_spatial_ft(x)
-	L = plan_lr2time(x, V_conj, VT)
-	return L * F
-end
 
-function apply_lr_mask(y::AbstractVector{C}, lr_mask::AbstractArray{R, 3}) where {C <: Complex, R <: Real}
-	num_σ = size(lr_mask, 3)
-	y = reshape(y, :, num_σ) # Reshapes allocate ...
+
+"""
+	plan_lr2kt(L::LinearMap, F::LinearMap)
+
+"""
+@inline plan_lr2kt(Λ::LinearMap, F::LinearMap) = Λ * F
+"""
+	plan_lr2kt(L::LinearMap, F::LinearMap, S::LinearMap)
+
+"""
+@inline plan_lr2kt(Λ::LinearMap, F::LinearMap, S::LinearMap) = plan_lr2kt(Λ, F) * S
+
+
+
+"""
+
+	function apply_lr_mask(y::AbstractVector{C}, lr_mask::AbstractArray{R, 3}, channels::Integer) where {C <: Complex, R <: Real}
+
+lr_masks[σ, σ, spatial dimensions]
+
+"""
+function apply_lr_mask(
+	y::AbstractVector{C},
+	lr_mask::AbstractArray{<: Real, 3},
+	channels::Integer # Makes sense to use Val{N}?
+) where C <: Complex
+	num_σ = size(lr_mask, 1)
+	# TODO: check shape
+	y = reshape(y, size(lr_mask, 3), channels, num_σ) # Reshapes allocate ...
 	yd = decomplexify(y)
 	ymd = similar(yd)
-	@turbo for x in axes(lr_mask, 1)
+	@turbo for x in axes(lr_mask, 3), c = 1:channels
 		for σ2 = 1:num_σ
 			ym_real = 0.0
 			ym_imag = 0.0
 			for σ1 = 1:num_σ
-				ym_real += yd[1, x, σ1] * lr_mask[x, σ1, σ2]
-				ym_imag += yd[2, x, σ1] * lr_mask[x, σ1, σ2]
+				ym_real += yd[1, x, c, σ1] * lr_mask[σ1, σ2, x]
+				ym_imag += yd[2, x, c, σ1] * lr_mask[σ1, σ2, x]
 			end
-			ymd[1, x, σ2] = ym_real
-			ymd[2, x, σ2] = ym_imag
+			ymd[1, x, c, σ2] = ym_real
+			ymd[2, x, c, σ2] = ym_imag
 		end
 	end
 	ym = reinterpret(C, vec(ymd))
 	return ym
 end
-function apply_lr_mask(y::AbstractVector{C1}, lr_mask::AbstractArray{C2, 3}) where {C1 <: Complex, C2 <: Complex}
+function apply_lr_mask(
+	y::AbstractVector{C},
+	lr_mask_d::AbstractArray{<: Real, 4},
+	channels::Integer
+) where C <: Complex
 	num_σ = size(lr_mask, 3)
-	lr_mask_d = decomplexify(lr_mask)
-	y = reshape(y, :, num_σ)
+	y = reshape(y, size(lr_masks, 3), channels, num_σ)
 	yd = decomplexify(y)
 	ymd = similar(yd) # y *m*asked and *d*ecomplexified
-	@turbo for x = axes(lr_mask, 1)
+	@turbo for x = axes(lr_mask, 3), c = 1:channels
 		for σ2 = 1:num_σ
 			ym_real = 0.0
 			ym_imag = 0.0
 			for σ1 = 1:num_σ
 				ym_real += (
-					  yd[1, x, σ1] * lr_mask_d[1, x, σ1, σ2]
-					- yd[2, x, σ1] * lr_mask_d[2, x, σ1, σ2]
+					  yd[1, x, c, σ1] * lr_mask_d[1, σ1, σ2, x]
+					- yd[2, x, c, σ1] * lr_mask_d[2, σ1, σ2, x]
 				)
 				ym_imag += (
-					  yd[1, x, σ1] * lr_mask_d[1, x, σ1, σ2]
-					+ yd[2, x, σ1] * lr_mask_d[2, x, σ1, σ2]
+					  yd[1, x, c, σ1] * lr_mask_d[1, σ1, σ2, x]
+					+ yd[2, x, c, σ1] * lr_mask_d[2, σ1, σ2, x]
 				)
 			end
-			ymd[1, x, σ2] = ym_real
-			ymd[2, x, σ2] = ym_imag
+			ymd[1, x, c, σ2] = ym_real
+			ymd[2, x, c, σ2] = ym_imag
 		end
 	end
-	ym = reinterpret(C1, vec(ymd))
+	ym = reinterpret(C, vec(ymd))
 	return ym
 end
-function plan_lr_masking(lr_mask::AbstractArray{<: Number, N}) where N
+
+
+
+"""
+	plan_lr_masking(lr_mask::AbstractArray{<: Number, N}, channels::Integer) where N
+
+x[spatial dimensions..., channels, singular components]
+sensitivites[spatial dimensions..., channels]
+lr_mask[singular components, singular components, spatial dimensions...]
+
+"""
+function plan_lr_masking(lr_mask::AbstractArray{<: Number, N}, channels::Integer) where N
 	shape = size(lr_mask)
-	spatial_shape = shape[1:N-2]
-	num_σ = shape[N]
-	lr_mask = reshape(lr_mask, prod(spatial_shape), num_σ, num_σ)
+	spatial_shape = shape[3:N]
+	num_σ = shape[1]
+	@assert shape[2] == num_σ
+	spatial_dimensions = prod(spatial_shape)
+	lr_mask = reshape(lr_mask, num_σ, num_σ, spatial_dimensions) # It isn't copied, is that good? No...
+	lr_mask_d = decomplexify(lr_mask)
+	dimension = spatial_dimensions * channels * num_σ
 	# Define function
 	M = LinearMap{ComplexF64}(
-		y -> apply_lr_mask(y, lr_mask),
-		prod(spatial_shape) * num_σ,
+		y::AbstractVector{<: Complex} -> begin
+			apply_lr_mask(y, lr_mask_d, channels)
+		end,
+		dimension,
 		ishermitian=true
 	)
 	return M
 end
-function plan_lr2lr(
-	x::AbstractArray{<: Number, N},
-	lr_mask::AbstractArray{<: Number, K}
-) where {N, K}
-	@assert N == K-1
-	shape = size(lr_mask)[1:N]
-	num_σ = size(lr_mask)[K]
-	@assert shape == size(x)
-	@assert shape[N] == num_σ
-	M = plan_lr_masking(lr_mask)
-	F = plan_spatial_ft(x)
-	return F' * M * F
-end
-# TODO: add functions to generate this from F and M
 
 
+
+"""
+	plan_lr2lr(F::LinearMap, M::LinearMap [, S::LinearMap])
+
+"""
+@inline plan_lr2lr(F::LinearMap, M::LinearMap) = F' * M * F
+@inline plan_lr2lr(F::LinearMap, M::LinearMap, S::LinearMap) = S' * F' * M * F * S
+
+
+
+"""
+	projection_matrix(x::AbstractArray{C, N}, DT_renorm::AbstractMatrix{<: Real}, matches::AbstractVector{<: Integer}) where {C <: Complex, N}
+
+x[spatial dimensions and channels..., singular components]
+
+"""
 function projection_matrix(
-	x::AbstractArray{C, N},
+	x::AbstractArray{C, N}, # TODO: I don't like this concept, I should use type and shape ...
 	DT_renorm::AbstractMatrix{<: Real},
 	matches::AbstractVector{<: Integer}
 ) where {C <: Complex, N}
@@ -215,24 +267,24 @@ function projection_matrix(
 	# DT_renorm[σ, fingerprints] must be normalised in the SVD domain after cut-off
 
 	shape = size(x)
-	spatial_dimensions = prod(shape[1:N-1])
-	num_σ = shape[N]
-	n = spatial_dimensions * num_σ
-	num_D = size(DT_renorm, 2)
+	spatial_dimensions = prod(shape[1:N-2])
 	@assert length(matches) == spatial_dimensions
+	num_σ = shape[N]
 	@assert size(DT_renorm, 1) == num_σ
+	dimension = spatial_dimensions * num_σ
+	num_D = size(DT_renorm, 2)
 
 	P = LinearMap{ComplexF64}(
 		x::AbstractVector{<: Complex} -> begin
 			@assert all(1 .<= matches .<= num_D)
-			xd = reinterpret(real(C), x) # d for decomplexified
-			xd = reshape(xd, 2, spatial_dimensions, num_σ)
+			x = reshape(x, spatial_dimensions, num_σ) # Weird: this has to be done before complexifying, otherwise the same error as in overlap!() with views
+			xd = decomplexify(x) # d for decomplexified
 			xpd = similar(xd)
 			for xi in eachindex(matches)
 				@inbounds match = matches[xi]
 				p_real = 0.0
 				p_imag = 0.0
-				@turbo for σ = 1:num_σ # Shame, depends on execution order
+				@turbo for σ = 1:num_σ # Shame, two loops at one level not supported by LoopVectorization
 					p_real += DT_renorm[σ, match] * xd[1, xi, σ]
 					p_imag += DT_renorm[σ, match] * xd[2, xi, σ]
 				end
@@ -244,23 +296,34 @@ function projection_matrix(
 			xp = reinterpret(C, vec(xpd))
 			xp
 		end,
-		n,
+		dimension,
 		ishermitian=true
 	)
 	return P
 end
 
-function plan_lr2lr_regularised(x::AbstractArray{<: Complex}, A::LinearMap, P::LinearMap)
-	B = LinearMap{ComplexF64}(
+
+
+"""
+	plan_lr2lr_regularised(n::Integer, A::LinearMap, P::LinearMap)
+
+
+"""
+function plan_lr2lr_regularised(A::LinearMap, P::LinearMap)
+	Ar = LinearMap{ComplexF64}(
 		(x -> A*x + x - P*x),
-		prod(size(x)),
+		size(A, 1),
 		ishermitian=true
 	)
-	return B
+	return Ar
 end
 
+
+
+"""
+"""
 function admm(
-	b::AbstractVector{<: Complex}, # vec([spatial dimensions, time])
+	b::AbstractVector{<: Complex}, # vec([spatial dimensions, singular component])
 	A::LinearMap, # lr2lr
 	Ar::LinearMap, # lr2lr regularised
 	P::LinearMap,
@@ -288,6 +351,39 @@ function admm(
 	end
 	return x, y
 end
-
 # TODO: Get tests from 20220401_Simulation
 
+
+
+
+
+
+# Wrong and obsolete?
+function lr2time(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) where N
+	# TODO: This could be done with @turbo
+	shape = size(x)
+	x = reshape(x, :, shape[N])
+	xt = x * VT
+	xt = reshape(xt, shape[1:N-1]..., size(VT, 2))
+	return xt
+end
+function time2lr(xt::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}) where N
+	# TODO: This could be done with @turbo
+	shape = size(xt)
+	xt = reshape(xt, :, shape[N])
+	x = xt * V_conj
+	x = reshape(x, shape[1:N-1]..., size(V_conj, 2))
+	return x
+end
+function lr2kt(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) where N
+	# Channel and singular component dimension must be flat
+	y = fft(x, 1:N-1)
+	lr2time(x, VT)
+	return yt
+end
+function kt2lr(yt::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}) where N
+	# Channel and singular component dimension must be flat
+	time2lr(yt, V_conj)
+	y = ifft(yt, 1:N-1)
+	return y
+end
