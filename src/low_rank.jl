@@ -244,11 +244,13 @@ end
 
 
 """
-	plan_lr2lr(F::LinearMap, M::LinearMap [, S::LinearMap])
+	plan_PSF(F::LinearMap, M::LinearMap [, S::LinearMap])
+
+M must be low rank mask
 
 """
-@inline plan_lr2lr(F::LinearMap, M::LinearMap) = F' * M * F
-@inline plan_lr2lr(F::LinearMap, M::LinearMap, S::LinearMap) = S' * F' * M * F * S
+@inline plan_PSF(F::LinearMap, M::LinearMap) = F' * M * F
+@inline plan_PSF(F::LinearMap, M::LinearMap, S::LinearMap) = S' * F' * M * F * S
 
 
 
