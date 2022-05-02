@@ -14,38 +14,37 @@ function sampling_mask(timepoints::Integer, indices::AbstractVector{<: Integer}.
 end
 
 """
-	Helper for sparse2dense
-"""
-@inline function sparse2dense!(
-	b::AbstractArray{T, 5},
-	a::AbstractArray{T, 3},
-	timepoints::Integer,
-	j::NTuple{2, Integer}
-) where T <: Number
-	b[:, j..., :, mod1(i, timepoints)] = a[:, :, i]
-end
-@inline function sparse2dense!(
-	b::AbstractArray{T, 4},
-	a::AbstractArray{T, 2},
-	timepoints::Integer,
-	j::NTuple{2, Integer}
-) where T <: Number
-	b[j..., :, mod1(i, timepoints)] = a[:, i]
-end
-"""
 	For kspace data
-	Channels must be first axis of a
+	readout direction and channels must be first axis of a
 """
-function sparse2dense(a::AbstractArray{<: Number, N}, timepoints::Integer, indices::AbstractVector{<: Integer}...) where N
-	@assert all(size(a, N) .== length.(indices))
-	b = zeros(eltype(a), maximum.(indices)..., size(a, N-1), timepoints)
+function sparse2dense(a::AbstractArray{<: Number, 3}, timepoints::Integer, indices::AbstractVector{<: Integer}...)
+	@assert all(size(a, 3) .== length.(indices))
+	b = zeros(eltype(a), size(a, 1), maximum.(indices)..., size(a, 2), timepoints)
 	for (i, j) in enumerate(zip(indices...))
-		sparse2dense!(b, a, timepoints, j)
+		b[:, j..., :, mod1(i, timepoints)] = a[:, :, i]
 	end
 	return b
 end
-# TODO: Function from indices (above) to lr representation, picking out elements from VT/Vconj, simple for-loop will do
-# This should then be used also in the function below
+function kt2klr(
+	a::AbstractArray{<: Number, 3},
+	VH::AbstractMatrix{<: Number},
+	shape::NTuple{N, Integer},
+	indices::AbstractVector{<: Integer}...
+) where N
+	@assert N ∈ (1,2)
+	@assert all(size(a, 3) .== length.(indices))
+	@assert maximum.(indices) == shape
+	timepoints = size(VH, 2)
+	b = Array{ComplexF64, N+3}(undef, size(a, 1), shape..., size(a, 2), size(VH, 1)) # spatial dims..., channels, sigma
+	for (i, j) in enumerate(zip(indices...))
+		t = mod1(i, timepoints)
+		for σ in axes(VH, 1)
+			b[:, j..., :, σ] += VH[σ, t] * a[:, :, i]
+		end
+	end
+	return b
+end
+# This should be used also in the function below
 
 
 function low_rank_mask(mask::AbstractArray{<: Number, N}, VH::AbstractMatrix{<: T}) where {T, N}
@@ -440,26 +439,3 @@ end
 # TODO: Get tests from 20220401_Simulation
 
 
-
-
-# Wrong and obsolete?
-function lr2time(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) where N
-	# TODO: This could be done with @turbo
-	shape = size(x)
-	x = reshape(x, :, shape[N])
-	xt = x * VT
-	xt = reshape(xt, shape[1:N-1]..., size(VT, 2))
-	return xt
-end
-function lr2kt(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) where N
-	# Channel and singular component dimension must be flat
-	y = fft(x, 1:N-1)
-	lr2time(x, VT)
-	return yt
-end
-function kt2lr(yt::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}) where N
-	# Channel and singular component dimension must be flat
-	time2lr(yt, V_conj)
-	y = ifft(yt, 1:N-1)
-	return y
-end
