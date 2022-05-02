@@ -142,11 +142,11 @@ function find_maximum_overlap!(
 )
 	@inbounds for (i, fi) in enumerate(f_indices)
 		# iterate fingerprints in d
-		overlap_with_match = 0.0
-		match_index = 0 # if overlap is zero, then no fingerprint is matching. this means the fingerprint in f is zero.
+		overlap_with_match = -Inf # This ensures that a valid matching index di is produced.
+		match_index = 0 # If a vector in f is zero, then the matching index will be 1
 		for di in axes(overlap, 1)
 			# if greater overlap, store index and value
-			this_overlap = overlap[di, i]
+			this_overlap = overlap[di, i] # This will be at least zero
 			if overlap_with_match < this_overlap
 				match_index = di
 				overlap_with_match = this_overlap
@@ -238,8 +238,8 @@ end
 	f::AbstractArray{<: Real, 3},
 	indices::AbstractVector{<: Integer}
 )
-	f_subset .= f[:, :, indices]
-	return
+	f_subset[:, :, 1:length(indices)] .= f[:, :, indices]
+	return f_subset[:, :, 1:length(indices)]
 end
 @inline @views function copy_fingerprints!(
 	v_subset::NTuple{2, AbstractArray{<: Real, 3}},
@@ -248,9 +248,9 @@ end
 )
 	f, g = v
 	f_subset, g_subset = v_subset
-	copy_fingerprints!(f_subset, f, indices)
-	copy_fingerprints!(g_subset, g, indices)
-	return
+	f_subset_view = copy_fingerprints!(f_subset, f, indices)
+	g_subset_view = copy_fingerprints!(g_subset, g, indices)
+	return (f_subset_view, g_subset_view)
 end
 function match!(
 	matches::AbstractVector{<: Integer},	# Modified
@@ -273,8 +273,8 @@ function match!(
 		end
 		this_step = i:fi_max+i-1
 		this_f_indices = f_indices[this_step]
-		copy_fingerprints!(v_subset, v, this_f_indices)
-		overlap!(overlap, D, v_subset)
+		v_subset_views = copy_fingerprints!(v_subset, v, this_f_indices)
+		overlap!(overlap[:, 1:fi_max], D, v_subset_views)
 		find_maximum_overlap!(matches, match_overlap, overlap, this_f_indices, d0)
 	end
 	return
