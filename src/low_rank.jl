@@ -2,20 +2,55 @@
 # Definitions: Use flat spatial dimensions, i.e. vector is a matrix with one spatial and one temporal dimension.
 # For all the CG stuff however, this needs to be reshaped into a single vector
 
-function sparse2dense(a::AbstractVector{<: Number}, timepoints::Integer, indices::AbstractVector{<: Integer}...) where N
-	@assert all(length(a) .== length.(indices))
-	b = zeros(eltype(a), timepoints, maximum.(indices)...)
+"""
+	For the mask which requires permuted axes
+"""
+function sampling_mask(timepoints::Integer, indices::AbstractVector{<: Integer}...)
+	b = zeros(Float64, timepoints, maximum.(indices)...)
 	for (i, j) in enumerate(zip(indices...))
-		b[mod1(i, timepoints), j...] = a[i]
+		b[mod1(i, timepoints), j...] = 1
+	end
+	return b
+end
+
+"""
+	Helper for sparse2dense
+"""
+@inline function sparse2dense!(
+	b::AbstractArray{T, 5},
+	a::AbstractArray{T, 3},
+	timepoints::Integer,
+	j::NTuple{2, Integer}
+) where T <: Number
+	b[:, j..., :, mod1(i, timepoints)] = a[:, :, i]
+end
+@inline function sparse2dense!(
+	b::AbstractArray{T, 4},
+	a::AbstractArray{T, 2},
+	timepoints::Integer,
+	j::NTuple{2, Integer}
+) where T <: Number
+	b[j..., :, mod1(i, timepoints)] = a[:, i]
+end
+"""
+	For kspace data
+	Channels must be first axis of a
+"""
+function sparse2dense(a::AbstractArray{<: Number, N}, timepoints::Integer, indices::AbstractVector{<: Integer}...) where N
+	@assert all(size(a, N) .== length.(indices))
+	b = zeros(eltype(a), maximum.(indices)..., size(a, N-1), timepoints)
+	for (i, j) in enumerate(zip(indices...))
+		sparse2dense!(b, a, timepoints, j)
 	end
 	return b
 end
 # TODO: Function from indices (above) to lr representation, picking out elements from VT/Vconj, simple for-loop will do
 # This should then be used also in the function below
 
-function low_rank_mask(mask::AbstractArray{<: Number, N}, V::AbstractMatrix{<: T}, VH::AbstractMatrix{<: T}) where {T, N}
+
+function low_rank_mask(mask::AbstractArray{<: Number, N}, VH::AbstractMatrix{<: T}) where {T, N}
 	# mask[time, space]
-	# V[time, singular component]
+	# VH[singular component, time]
 	#=
 		For each voxel, mask singular vectors in V,
 		then do inner product with vectors in VH to form one matrix per voxel,
@@ -23,6 +58,7 @@ function low_rank_mask(mask::AbstractArray{<: Number, N}, V::AbstractMatrix{<: T
 	=#
 	shape = size(mask)[2:N]
 	lr_mask = Array{T}(undef, size(VH, 1), size(VH, 1), shape...)
+	V = VH'
 	@views for I in CartesianIndices(shape)
 		lr_mask[:, :, I] = VH * (mask[:, I] .* V)
 	end
@@ -32,7 +68,8 @@ end
 
 function convenient_Vs(VH::AbstractMatrix{<: Number})
 	# Convenience for getting the more practical versions of V: V* and V^T
-	transpose(VH), conj.(VH)
+	# TODO: collect or not?
+	collect(transpose(VH)), conj.(VH)
 end
 
 # Get the corresponding operator
@@ -64,22 +101,24 @@ end
 """
 	plan_sensitivities(sensitivities::Union{AbstractMatrix{<: Number}, AbstractArray{<: Number, 3}}) = S
 
-x[spatial dimensions..., channels, singular components]
 sensitivities[spatial dimensions..., channels]
+shape = (spatial dimensions, singular components)
 
 """
 function plan_sensitivities(
-	x::AbstractArray{<: Number, N},
-	sensitivities::AbstractArray{<: Number, M}
+	sensitivities::AbstractArray{<: Number, M},
+	shape::NTuple{N, <: Integer}
 ) where {N,M}
-	@assert N == M + 1
+	@assert N == M # shape excludes channels
 
 	# Get dimensions
 	# TODO: check spatial dims
-	num_σ = size(x, N)
-	shape = size(sensitivities)
-	spatial_dimensions = prod(shape[1:end-1])
-	channels = shape[end]
+	num_σ = shape[N]
+	shape = shape[1:N-1]
+	shape_s = size(sensitivities)
+	@assert shape == shape_s[1:M-1]
+	channels = shape_s[M]
+	spatial_dimensions = prod(shape)
 	input_dimension = spatial_dimensions * num_σ
 	output_dimension = input_dimension * channels
 
@@ -107,23 +146,24 @@ end
 """
 	plan_lr2time(x::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: Number}) where N
 
-x[spatial dimensions..., channels, singular components]
+(spatial dimensions..., singular components)
 
 """
-function plan_lr2time(x::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: Number}) where N
+function plan_lr2time(V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: Number}, shape::NTuple{N, Integer}, channels::Integer) where N
 	# TODO: This could be done with @turbo
 	time, num_σ = size(V_conj)
-	spatial_dimensions = prod(size(x)[1:N-1]) # Includes channels if present
-	input_dimension = num_σ * spatial_dimensions 
-	output_dimension = time * spatial_dimensions
+	@assert num_σ == shape[N]
+	residual_dimensions = prod(shape[1:N-1]) * channels
+	input_dimension = num_σ * residual_dimensions
+	output_dimension = time * residual_dimensions
 	Λ = LinearMap{ComplexF64}(
 		y -> begin
-			y = reshape(y, :, num_σ)
+			y = reshape(y, residual_dimensions, num_σ)
 			yt = y * VT
 			vec(yt)
 		end,
 		yt -> begin
-			yt = reshape(yt, :, time)
+			yt = reshape(yt, residual_dimensions, time)
 			y = yt * V_conj
 			vec(y)
 		end,
@@ -131,6 +171,20 @@ function plan_lr2time(x::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: 
 		input_dimension
 	)
 	return Λ
+end
+
+
+
+"""
+	Useful for compression actual kspace data for creating spatial ft without having to do the reshaping every time
+"""
+function time2lr(xt::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}) where N
+	# TODO: This could be done with @turbo
+	shape = size(xt)
+	xt = reshape(xt, :, shape[N])
+	x = xt * V_conj
+	x = reshape(x, shape[1:N-1]..., size(V_conj, 2))
+	return x
 end
 
 
@@ -216,7 +270,6 @@ end
 """
 	plan_lr_masking(lr_mask::AbstractArray{<: Number, N}, channels::Integer) where N
 
-x[spatial dimensions..., channels, singular components]
 sensitivites[spatial dimensions..., channels]
 lr_mask[singular components, singular components, spatial dimensions...]
 
@@ -249,27 +302,26 @@ end
 M must be low rank mask
 
 """
-@inline plan_PSF(F::LinearMap, M::LinearMap) = F' * M * F
-@inline plan_PSF(F::LinearMap, M::LinearMap, S::LinearMap) = S' * F' * M * F * S
+@inline plan_psf(F::LinearMap, M::LinearMap) = F' * M * F
+@inline plan_psf(F::LinearMap, M::LinearMap, S::LinearMap) = S' * F' * M * F * S
 
 
 
 """
 	projection_matrix(x::AbstractArray{C, N}, DT_renorm::AbstractMatrix{<: Real}, matches::AbstractVector{<: Integer}) where {C <: Complex, N}
 
-x[spatial dimensions and channels..., singular components]
+x[spatial dimensions ..., singular components]
 
 """
 function projection_matrix(
-	x::AbstractArray{C, N}, # TODO: I don't like this concept, I should use type and shape ...
 	DT_renorm::AbstractMatrix{<: Real},
-	matches::AbstractVector{<: Integer}
+	matches::AbstractVector{<: Integer},
+	shape::NTuple{N, Integer},
+	T::Type{C}
 ) where {C <: Complex, N}
 	# `matches` must be preallocated and filled to update P
 	# DT_renorm[σ, fingerprints] must be normalised in the SVD domain after cut-off
-
-	shape = size(x)
-	spatial_dimensions = prod(shape[1:N-2])
+	spatial_dimensions = prod(shape[1:N-1])
 	@assert length(matches) == spatial_dimensions
 	num_σ = shape[N]
 	@assert size(DT_renorm, 1) == num_σ
@@ -278,7 +330,7 @@ function projection_matrix(
 
 	P = LinearMap{ComplexF64}(
 		x::AbstractVector{<: Complex} -> begin
-			@assert all(1 .<= matches .<= num_D)
+			@assert all(0 .<= matches .<= num_D) # Zero is a forbidden index, in that case a zero filled vector will be returned
 			x = reshape(x, spatial_dimensions, num_σ) # Weird: this has to be done before complexifying, otherwise the same error as in overlap!() with views
 			xd = decomplexify(x) # d for decomplexified
 			xpd = similar(xd)
@@ -307,13 +359,13 @@ end
 
 
 """
-	plan_lr2lr_regularised(n::Integer, A::LinearMap, P::LinearMap)
+	plan_psf_regularised(n::Integer, A::LinearMap, P::LinearMap)
 
 
 """
-function plan_lr2lr_regularised(A::LinearMap, P::LinearMap)
+function plan_psf_regularised(A::LinearMap, P::LinearMap, ρ::Real)
 	Ar = LinearMap{ComplexF64}(
-		(x -> A*x + x - P*x),
+		(x -> A*x + ρ * (x - P*x)),
 		size(A, 1),
 		ishermitian=true
 	)
@@ -323,39 +375,69 @@ end
 
 
 """
+
+Creates closure with all relevant info for matching
+
+"""
+function matching_closure(
+	D::AbstractMatrix{<: Number},
+	indices::AbstractVector{<: Integer},
+	stride::Integer,
+	step::Integer,
+	num_f::Integer
+)
+	# TODO: Could do this in a way that it writes into the matches array directly
+	num_σ = size(D, 2)
+	match(x::NTuple{1, AbstractMatrix{<: Number}}) = MRFingerprinting.match(D, x[1], indices, stride, step)
+	match(x::NTuple{2, AbstractMatrix{<: Number}}) = MRFingerprinting.match(D, x, indices, stride, step)
+	return function match(x::AbstractVector{<: Number}...)
+		x = reshape.(x, num_f, num_σ)
+		x = transpose.(x)
+		matches, overlap = match(x)
+		return matches
+	end
+end
+
+
+
+"""
 """
 function admm(
 	b::AbstractVector{<: Complex}, # vec([spatial dimensions, singular component])
-	A::LinearMap, # lr2lr
-	Ar::LinearMap, # lr2lr regularised
+	A::LinearMap, # PSF
+	Ar::LinearMap, # PSF regularised
 	P::LinearMap,
-	matches::AbstractVector{<: Integer},
-	find_matches::Function,
-	maxiter::Integer
-)
+	ρ::Real, # Weighting of dictionary regularisation term, in theory the weighting is ρ/2, but here just ρ is used!
+	matches::AbstractVector{<: Integer}, # is modified
+	match::Function, # Must support match(x) and match(x,y)
+	maxiter::Integer, # 48
+	cg_maxiter # 64
+)::NTuple{2, Vector{ComplexF64}}
+	@assert maxiter > 0
 	# Do it specialised for MRF because P is not Vector in the implementation, but mathematically it is
 	# See Boyd2010
-	x = cg(A, b, maxiter=64) # Initial value is computed from standard low-rank reconstruction,
-	# TODO: above, how many iterations since noise amplification?
-	y = zeros(ComplexF64, length(x))
+
+	# First iteration with P = I, y = 0
+	x = cg(A, b, maxiter=cg_maxiter) # How many iterations here?
+	matches .= match(x)
+	y = x - P*x
+	# Allocate space
 	br = Vector{ComplexF64}(undef, length(x))
-	for i = 1:maxiter
+	# All other iterations
+	for i = 1:maxiter-1
 		# Construct right hand side of normal equations
-		br .= b .- y .+ P*y
+		br .= b .- ρ .* (y .- P*y)
 		# x
-		x = cg(Ar, br, maxiter=1024)
+		cg!(x, Ar, br, maxiter=cg_maxiter)
 		# P
-		matches .= find_matches(x, y)
-		# P is updated because it has pointer to `matches`
+		matches .= match(x, y) # P is updated because it has pointer to `matches`
 		# y
-		y .+= x - P*x
-		# TODO: Stopping criteria, check Asslander's code
+		y .+= x .- P * x
+		# Stopping criteria TODO: check Asslander's code
 	end
 	return x, y
 end
 # TODO: Get tests from 20220401_Simulation
-
-
 
 
 
@@ -368,14 +450,6 @@ function lr2time(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) 
 	xt = x * VT
 	xt = reshape(xt, shape[1:N-1]..., size(VT, 2))
 	return xt
-end
-function time2lr(xt::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}) where N
-	# TODO: This could be done with @turbo
-	shape = size(xt)
-	xt = reshape(xt, :, shape[N])
-	x = xt * V_conj
-	x = reshape(x, shape[1:N-1]..., size(V_conj, 2))
-	return x
 end
 function lr2kt(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) where N
 	# Channel and singular component dimension must be flat
