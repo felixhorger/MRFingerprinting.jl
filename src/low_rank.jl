@@ -28,14 +28,14 @@ end
 function kt2klr(
 	a::AbstractArray{<: Number, 3},
 	VH::AbstractMatrix{<: Number},
-	shape::NTuple{N, Integer},
+	shape::NTuple{2, Integer},
 	indices::AbstractVector{<: Integer}...
-) where N
-	@assert N ∈ (1,2)
+)
 	@assert all(size(a, 3) .== length.(indices))
-	@assert maximum.(indices) == shape
+	@assert all(all(0 .< indices[d] .<= shape[d]) for d ∈ (1,2))
 	timepoints = size(VH, 2)
-	b = Array{ComplexF64, N+3}(undef, size(a, 1), shape..., size(a, 2), size(VH, 1)) # spatial dims..., channels, sigma
+	b = zeros(ComplexF64, size(a, 1), shape..., size(a, 2), size(VH, 1)) # spatial dims..., channels, sigma
+	# Must be zeros because if a location isn't sampled it would contain undefs
 	for (i, j) in enumerate(zip(indices...))
 		t = mod1(i, timepoints)
 		for σ in axes(VH, 1)
