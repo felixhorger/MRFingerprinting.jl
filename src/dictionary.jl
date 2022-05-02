@@ -6,6 +6,18 @@ function normalise(D::AbstractMatrix{<: Number})::Tuple{AbstractMatrix{<: Number
 	return D, norms
 end
 
+
+"""
+
+Required for projection matrix
+
+"""
+function normalise_transpose(D::AbstractMatrix{<: Number})
+	DT_renorm = collect(transpose(D))
+	DT_renorm ./= sqrt.(sum(abs2, DT_renorm; dims=1))
+end
+
+
 function compress(D::AbstractMatrix{<: Number})::Tuple{Matrix{<: Number}, Vector{<: Number}, Matrix{<: Number}}
 	# Axes: D[fingerprint, time]
 	# Returns:
