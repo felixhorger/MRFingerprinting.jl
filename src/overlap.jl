@@ -85,9 +85,8 @@ end
 		end
 		y[ai, xi] = (
 			v_real^2 + v_imag^2						# ||ax||^2
-			+ 2 * (v_real*w_real + v_imag*w_imag)	# 2Re{z^H a * a^H x}
-			# where a is a row of A
-		)
+			+ 2 * (v_real*w_real + v_imag*w_imag)	# 2Re{z^H a * a^H x} where a is a row of A
+		) # This can be negative
 	end
 	return
 end
