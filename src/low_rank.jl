@@ -2,29 +2,6 @@
 # Definitions: Use flat spatial dimensions, i.e. vector is a matrix with one spatial and one temporal dimension.
 # For all the CG stuff however, this needs to be reshaped into a single vector
 
-"""
-	For the mask which requires permuted axes
-"""
-function sampling_mask(timepoints::Integer, indices::AbstractVector{<: Integer}...)
-	b = zeros(Float64, timepoints, maximum.(indices)...)
-	for (i, j) in enumerate(zip(indices...))
-		b[mod1(i, timepoints), j...] = 1
-	end
-	return b
-end
-
-"""
-	For kspace data
-	readout direction and channels must be first axis of a
-"""
-function sparse2dense(a::AbstractArray{<: Number, 3}, timepoints::Integer, indices::AbstractVector{<: Integer}...)
-	@assert all(size(a, 3) .== length.(indices))
-	b = zeros(eltype(a), size(a, 1), maximum.(indices)..., size(a, 2), timepoints)
-	for (i, j) in enumerate(zip(indices...))
-		b[:, j..., :, mod1(i, timepoints)] = a[:, :, i]
-	end
-	return b
-end
 function kt2klr(
 	a::AbstractArray{<: Number, 3},
 	VH::AbstractMatrix{<: Number},
@@ -36,7 +13,7 @@ function kt2klr(
 	timepoints = size(VH, 2)
 	b = zeros(ComplexF64, size(a, 1), shape..., size(a, 2), size(VH, 1)) # spatial dims..., channels, sigma
 	# Must be zeros because if a location isn't sampled it would contain undefs
-	for (i, j) in enumerate(zip(indices...))
+	@inbounds for (i, j) in enumerate(zip(indices...))
 		t = mod1(i, timepoints)
 		for σ in axes(VH, 1)
 			b[:, j..., :, σ] += VH[σ, t] * a[:, :, i]
@@ -48,6 +25,8 @@ end
 
 
 function low_rank_mask(mask::AbstractArray{<: Number, N}, VH::AbstractMatrix{<: T}) where {T, N}
+	# TODO: take indices and not mask, then do "sparse" operations
+
 	# mask[time, space]
 	# VH[singular component, time]
 	#=
@@ -64,82 +43,11 @@ function low_rank_mask(mask::AbstractArray{<: Number, N}, VH::AbstractMatrix{<: 
 	return lr_mask
 end
 
-
 function convenient_Vs(VH::AbstractMatrix{<: Number})
 	# Convenience for getting the more practical versions of V: V* and V^T
 	# TODO: collect or not?
 	collect(transpose(VH)), conj.(VH)
 end
-
-# Get the corresponding operator
-function plan_spatial_ft(x::AbstractArray{<: Number, N}) where N
-	# x[spatial dimensions..., channels, singular components]
-	# Pay attention that they have to be applied in pairs! Otherwise scaling
-	FFT = plan_fft(x, 1:N-2)
-	FFTH = inv(FFT)
-	shape = size(x)
-	restore_shape(x) = reshape(x, shape) # Note that x is Vector
-	F = LinearMap{ComplexF64}(
-		x -> begin
-			x = restore_shape(x)
-			y = FFT * x
-			vec(y)
-		end,
-		y -> let
-			y = restore_shape(y)
-			x = FFTH * y
-			vec(x)
-		end,
-		prod(shape)
-	)
-	return F
-end
-
-
-
-"""
-	plan_sensitivities(sensitivities::Union{AbstractMatrix{<: Number}, AbstractArray{<: Number, 3}}) = S
-
-sensitivities[spatial dimensions..., channels]
-shape = (spatial dimensions, singular components)
-
-"""
-function plan_sensitivities(
-	sensitivities::AbstractArray{<: Number, M},
-	shape::NTuple{N, <: Integer}
-) where {N,M}
-	@assert N == M # shape excludes channels
-
-	# Get dimensions
-	# TODO: check spatial dims
-	num_σ = shape[N]
-	shape = shape[1:N-1]
-	shape_s = size(sensitivities)
-	@assert shape == shape_s[1:M-1]
-	channels = shape_s[M]
-	spatial_dimensions = prod(shape)
-	input_dimension = spatial_dimensions * num_σ
-	output_dimension = input_dimension * channels
-
-	# Reshape
-	sensitivities = reshape(sensitivities, spatial_dimensions, channels, 1)
-	conj_sensitivities = conj.(sensitivities)
-
-	S = LinearMap{ComplexF64}(
-		x::AbstractVector{<: Complex} -> begin
-			Sx = sensitivities .* reshape(x, spatial_dimensions, 1, num_σ)
-			vec(Sx)
-		end,
-		y::AbstractVector{<: Complex} -> begin
-			y = reshape(y, spatial_dimensions, channels, num_σ)
-			SHy = sum(conj_sensitivities .* y; dims=2)
-			vec(SHy)
-		end,
-		output_dimension, input_dimension
-	)
-	return S
-end
-
 
 
 """
@@ -295,14 +203,6 @@ end
 
 
 
-"""
-	plan_PSF(F::LinearMap, M::LinearMap [, S::LinearMap])
-
-M must be low rank mask
-
-"""
-@inline plan_psf(F::LinearMap, M::LinearMap) = F' * M * F
-@inline plan_psf(F::LinearMap, M::LinearMap, S::LinearMap) = S' * F' * M * F * S
 
 
 
