@@ -2,13 +2,13 @@
 module MRFingerprinting
 
 	using LinearAlgebra
+	using LinearMaps
 	using LoopVectorization
 	using Statistics
-	using FFTW
 	using IterativeSolvers
-	using LinearMaps
 	import Optim
 	import BlackBoxOptim
+	import MRIRecon
 
 	include("overlap.jl")
 	include("fit.jl")
