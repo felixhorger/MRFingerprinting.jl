@@ -56,11 +56,11 @@ end
 (spatial dimensions..., singular components)
 
 """
-function plan_lr2time(V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: Number}, shape::NTuple{N, Integer}, channels::Integer) where N
+function plan_lr2time(V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: Number}, shape::NTuple{N, Integer}) where N
 	# TODO: This could be done with @turbo
 	time, num_σ = size(V_conj)
 	@assert num_σ == shape[N]
-	residual_dimensions = prod(shape[1:N-1]) * channels
+	residual_dimensions = prod(shape[1:N-1])
 	input_dimension = num_σ * residual_dimensions
 	output_dimension = time * residual_dimensions
 	Λ = LinearMap{ComplexF64}(
@@ -259,7 +259,9 @@ end
 
 """
 	plan_psf_regularised(n::Integer, A::LinearMap, P::LinearMap)
-
+	A = S' * F' * M * F * S, i.e. the PSF without the projection.
+	Note that M can be a low-rank mask, i.e. this acts on a vector
+	in temporal low-rank image space.
 
 """
 function plan_psf_regularised(A::LinearMap, P::LinearMap, ρ::Real)
