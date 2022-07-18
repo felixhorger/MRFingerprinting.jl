@@ -112,7 +112,10 @@ function prepare_matching(
 	stride::Integer,
 	step::Integer
 ) where C <: Complex
-	@assert all(1 .<= indices .<= size(D, 1) ÷ stride)
+	@assert all(
+		i -> (1 <= i <= size(D, 1) ÷ stride),
+		indices
+	)
 	@assert length(indices) == size(f, 2)
 	subset = Vector{Int64}(undef, size(f, 2))
 	f_subset = Array{real(C), 3}(undef, 2, size(f, 1), step)
