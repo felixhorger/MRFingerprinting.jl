@@ -161,11 +161,12 @@ function apply_lr_mask(
 	readout_length::Integer, # Needs to be separate because of the order in which y usually is
 	channels::Integer
 ) where C <: Complex
-	num_σ = size(lr_mask, 3)
-	y = reshape(y, readout_length, size(lr_masks, 3), channels, num_σ)
+	num_σ = size(lr_mask_d, 3)
+	num_x = size(lr_mask_d, 4)
+	y = reshape(y, readout_length, num_x, channels, num_σ)
 	yd = decomplexify(y)
 	ymd = similar(yd) # y *m*asked and *d*ecomplexified
-	@turbo for x = axes(lr_mask, 3), c = 1:channels, s = 1:readout_length
+	@turbo for x = axes(lr_mask_d, 4), c = 1:channels, s = 1:readout_length
 		for σ2 = 1:num_σ
 			ym_real = 0.0
 			ym_imag = 0.0
@@ -175,8 +176,8 @@ function apply_lr_mask(
 					- yd[2, s, x, c, σ1] * lr_mask_d[2, σ1, σ2, x]
 				)
 				ym_imag += (
-					  yd[1, s, x, c, σ1] * lr_mask_d[1, σ1, σ2, x]
-					+ yd[2, s, x, c, σ1] * lr_mask_d[2, σ1, σ2, x]
+					  yd[1, s, x, c, σ1] * lr_mask_d[2, σ1, σ2, x]
+					+ yd[2, s, x, c, σ1] * lr_mask_d[1, σ1, σ2, x]
 				)
 			end
 			ymd[1, s, x, c, σ2] = ym_real
