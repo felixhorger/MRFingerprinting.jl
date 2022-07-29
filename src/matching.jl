@@ -57,7 +57,7 @@ Unpack `Tuple`-like parameter maps, i.e. with parameter combinations, into maps 
 
 """
 function unpack_parameters(map::AbstractVector{<: NTuple{N, <: Any}}) where N
-	ntuple( i -> [map[j][i] for j in eachindex(map)], N )
+	ntuple((i -> [map[j][i] for j in eachindex(map)]), Val(N))
 end
 
 
