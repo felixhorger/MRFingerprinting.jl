@@ -21,7 +21,7 @@ function kt2klr(
 	x::AbstractArray{<: Number, 3},
 	VH::AbstractMatrix{<: Number},
 	shape::NTuple{N, Integer},
-	indices::AbstractVector{<: NTuple{N, Integer}}
+	indices::AbstractVector{<: CartesianIndex{N}}
 ) where N
 	@assert all(size(x, 3) .== length.(indices))
 	@assert all(all(0 .< indices[d] .<= shape[d]) for d ∈ 1:N)
@@ -31,7 +31,7 @@ function kt2klr(
 	@inbounds for (i, j) in enumerate(indices)
 		t = mod1(i, timepoints)
 		for σ in axes(VH, 1)
-			y[:, j..., :, σ] += VH[σ, t] * x[:, :, i]
+			y[:, j, :, σ] += VH[σ, t] * x[:, :, i]
 		end
 	end
 	return y
@@ -52,6 +52,7 @@ end
 function plan_lr2time(V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: Number}, num_other::Integer)
 	# TODO: This could be done with @turbo
 	num_time, num_σ = size(V_conj)
+	@assert size(VT) == (num_σ, num_time)
 	input_dimension = num_σ * num_other
 	output_dimension = num_time * num_other
 	Λ = LinearMap{ComplexF64}(
@@ -88,100 +89,108 @@ end
 @inline plan_lr2kt(Λ::LinearMap, F::LinearMap, S::LinearMap) = plan_lr2kt(Λ, F) * S
 
 
+
 """
 	shape is the shape of the phase encoding plane
-	mask[time, space]
 	VH[singular component, time]
 	
 	For each voxel, mask singular vectors in V,
 	then do inner product with vectors in VH to form one matrix per voxel,
 	transforming signals from the temporal low-rank domain into itself.
-	
-	Note: There is no use case of difference phase encoding steps with overlapping readouts (k-wise) I know of,
-	so this assumes only the same phase encoding step overlaps with itself (to compute the mask).
+
+	indices must be unique in the k-t domain otherwise this will be wrong!
 """
-function low_rank_mask(
-	V_conj::AbstractMatrix{<: T},
+function lowrank_mixing(
 	VT::AbstractMatrix{<: T},
-	indices::AbstractVector{<: NTuple{N, Integer}},
-	shape::NTuple{N, Integer},
-	num_dynamic::Integer
+	indices::AbstractVector{<: CartesianIndex{N}},
+	shape::NTuple{N, Integer}
 ) where {N, T}
-	num_readouts = prod(shape)
-	num_σ = size(VT, 1)
+	num_σ, num_dynamic = size(VT)
 	linear_indices = LinearIndices(shape)
-	perm = sortperm(indices; by=(t::NTuple{N, Integer} -> linear_indices[t...]))
-	lr_mask = zeros(T, size(VT, 1), size(VT, 1), shape...)
+	perm = sortperm(indices; by=(x::CartesianIndex{N} -> linear_indices[x]))
+	lr_mix = zeros(T, num_σ, num_σ, shape...)
 	for i in eachindex(perm)
 		j = perm[i]
-		x = indices[j]
 		dynamic = mod1(j, num_dynamic)
-		mixing_matrix = @view lr_mask[:, :, x...]
-		@turbo for σ1 = 1:num_σ, σ2 = 1:num_σ
-			mixing_matrix[σ1, σ2] += VT[σ1, dynamic] * V_conj[dynamic, σ2] # Outer product
+		k = indices[j]
+		# Outer product of singular vectors
+		# M_{σ,σ'}	= ∑_{t,t'} V^H_{σ,t} ⋅ U_{t,t'} ⋅ V_{t',σ'}
+		#			= ∑_{t,t'} U_{t,t'} ⋅ V_{t',σ'} ⋅ V^*_{t,σ}
+		#			= ∑_{t,t'} u_t ⋅ δ_{t,t'} ⋅ V_{t',σ'} ⋅ V^*_{t,σ}
+		#			= ∑_t u_t ⋅ V^*_{t,σ} ⋅ V_{t,σ'}
+		for σ2 = 1:num_σ, σ1 = 1:num_σ
+			#v = ...
+			lr_mix[σ1, σ2, k] += conj(VT[σ1, dynamic]) * VT[σ2, dynamic]
+			# Note: the mixing matrices are Hermitian, thus the above could be σ2 = σ1:num_σ
+			# and then copying the other half:
+			#if σ1 ≠ σ2
+			#	lr_mix[σ2, σ1, k] += conj(v)
+			#end
+			# However it doesn't pay off if num_σ is small
 		end
 	end
-	return lr_mask
+	return lr_mix
 end
 
 """
 
-lr_masks[σ, σ, spatial dimensions]
+lr_mix[σ, σ, spatial dimensions]
 
 """
-function apply_lr_mask(
+function apply_lowrank_mixing(
 	y::AbstractVector{C},
-	lr_mask::AbstractArray{<: Real, 3}, # Flat spatial dimension
-	readout_length::Integer, # Needs to be separate because of the order in which y usually is
-	channels::Integer # Makes sense to use Val{N}?
+	lr_mix::AbstractArray{<: Real, 3}, # Flat spatial dimension
+	ι::Integer,
+	κ::Integer
 ) where C <: Complex
-	num_σ = size(lr_mask, 1)
+	num_σ = size(lr_mix, 1)
+	num_x = size(lr_mix, 3)
 	# TODO: check shape
-	y = reshape(y, readout_length, size(lr_mask, 3), channels, num_σ) # Reshapes allocate ...
+	y = reshape(y, ι, num_x, κ, num_σ)
 	yd = decomplexify(y)
-	ymd = similar(yd)
-	@turbo for x in axes(lr_mask, 3), c = 1:channels, s = 1:readout_length
+	ymd = similar(yd) # y *m*ixed and *d*ecomplexified
+	@turbo for k = 1:κ, x = 1:num_x, i = 1:ι
 		for σ2 = 1:num_σ
 			ym_real = 0.0
 			ym_imag = 0.0
 			for σ1 = 1:num_σ
-				ym_real += yd[1, s, x, c, σ1] * lr_mask[σ1, σ2, x]
-				ym_imag += yd[2, s, x, c, σ1] * lr_mask[σ1, σ2, x]
+				ym_real += yd[1, i, x, k, σ1] * lr_mix[σ1, σ2, x]
+				ym_imag += yd[2, i, x, k, σ1] * lr_mix[σ1, σ2, x]
 			end
-			ymd[1, s, x, c, σ2] = ym_real
-			ymd[2, s, x, c, σ2] = ym_imag
+			ymd[1, i, x, k, σ2] = ym_real
+			ymd[2, i, x, k, σ2] = ym_imag
 		end
 	end
 	ym = reinterpret(C, vec(ymd))
 	return ym
 end
-function apply_lr_mask(
+function apply_lowrank_mixing(
 	y::AbstractVector{C},
-	lr_mask_d::AbstractArray{<: Real, 4},
-	readout_length::Integer, # Needs to be separate because of the order in which y usually is
-	channels::Integer
+	lr_mix_d::AbstractArray{<: Real, 4},
+	ι::Integer,
+	κ::Integer
 ) where C <: Complex
-	num_σ = size(lr_mask_d, 3)
-	num_x = size(lr_mask_d, 4)
+	num_σ = size(lr_mix_d, 3)
+	num_x = size(lr_mix_d, 4)
 	y = reshape(y, readout_length, num_x, channels, num_σ)
 	yd = decomplexify(y)
-	ymd = similar(yd) # y *m*asked and *d*ecomplexified
-	@turbo for x = axes(lr_mask_d, 4), c = 1:channels, s = 1:readout_length
+	ymd = similar(yd) # y *m*ixed and *d*ecomplexified
+	@tturbo for k = 1:κ, x = 1:num_x, i = 1:ι
 		for σ2 = 1:num_σ
 			ym_real = 0.0
 			ym_imag = 0.0
 			for σ1 = 1:num_σ
 				ym_real += (
-					  yd[1, s, x, c, σ1] * lr_mask_d[1, σ1, σ2, x]
-					- yd[2, s, x, c, σ1] * lr_mask_d[2, σ1, σ2, x]
+					  yd[1, i, x, k, σ1] * lr_mix_d[1, σ1, σ2, x]
+					- yd[2, i, x, k, σ1] * lr_mix_d[2, σ1, σ2, x]
 				)
 				ym_imag += (
-					  yd[1, s, x, c, σ1] * lr_mask_d[2, σ1, σ2, x]
-					+ yd[2, s, x, c, σ1] * lr_mask_d[1, σ1, σ2, x]
+					  yd[1, i, x, k, σ1] * lr_mix_d[2, σ1, σ2, x]
+					+ yd[2, i, x, k, σ1] * lr_mix_d[1, σ1, σ2, x]
 				)
 			end
-			ymd[1, s, x, c, σ2] = ym_real
-			ymd[2, s, x, c, σ2] = ym_imag
+			ymd[1, i, x, k, σ2] = ym_real
+			ymd[2, i, x, k, σ2] = ym_imag
 		end
 	end
 	ym = reinterpret(C, vec(ymd))
@@ -192,47 +201,71 @@ end
 
 """
 
-lr_mask[σ1, σ2, spatial dimensions...]
-lr_mask not copied
+lr_mix[σ1, σ2, spatial dimensions...]
+lr_mix not copied
+
+ι,κ = number of elements in the first,last spatial dimension of y
+which is assumed to be acquires at the same time.
+For example: 3D Cartesian imaging would have dimensions (num_lines, num_partitions, num_readouts)
+where readouts can be Fourier transformed beforehand. In this case ι = 1 and κ = num_readouts.
+For stack of stars with fully sampled partition direction, (num_columns, num_lines, num_partitions)
+is more favourable, so ι = num_columns and κ = num_partitions.
+For multi-channel data, the number of channels and κ can be fused.
+
 """
-function plan_lr_masking(lr_mask::AbstractArray{<: Number, N}, readout_length::Integer, num_channels::Integer) where N
+function plan_lowrank_mixing(lr_mix::AbstractArray{<: Number, N}, ι::Integer, κ::Integer) where N
 	# Get and check shapes
-	lr_mask_shape = size(lr_mask)
-	num_σ = lr_mask_shape[1]
-	@assert lr_mask_shape[2] == num_σ
-	shape = lr_mask_shape[3:N]
+	lr_mix_shape = size(lr_mix)
+	num_σ = lr_mix_shape[1]
+	@assert lr_mix_shape[2] == num_σ
+	shape = lr_mix_shape[3:N]
 	num_phase_encode = prod(shape)
 	# Reshape and split real/imag
-	lr_mask = reshape(lr_mask, num_σ, num_σ, num_phase_encode) # It isn't copied
-	lr_mask_d = decomplexify(lr_mask)
+	lr_mix = reshape(lr_mix, num_σ, num_σ, num_phase_encode) # It isn't copied
+	lr_mix_d = decomplexify(lr_mix)
 	# Define function
 	M = LinearMap{ComplexF64}(
 		y::AbstractVector{<: Complex} -> begin
-			apply_lr_mask(y, lr_mask_d, readout_length, num_channels)
+			apply_lowrank_mixing(y, lr_mix_d, ι, κ)
 		end,
-		num_phase_encode * readout_length * num_channels * num_σ,
+		num_phase_encode * ι * κ * num_σ,
 		ishermitian=true
 	)
 	return M
 end
-"""
-shape includes channels
-"""
-function plan_lr_masking(
-	V_conj::AbstractMatrix{<: Number},
+function plan_lowrank_mixing(
 	VT::AbstractMatrix{<: Number},
-	indices::AbstractVector{<: NTuple{N, Integer}},
+	indices::AbstractVector{<: CartesianIndex{N}},
 	shape::NTuple{N, Integer},
-	readout_length::Integer,
-	num_channels::Integer,
-	num_dynamic::Integer
+	ι::Integer,
+	κ::Integer,
 ) where N
-	lr_mask = low_rank_mask(V_conj, VT, indices, shape, num_dynamic)
-	return plan_lr_masking(lr_mask, readout_length, num_channels)
+	lr_mix = lowrank_mixing(VT, indices, shape)
+	return plan_lowrank_mixing(lr_mix, ι, κ)
 end
 
 
 
+function lowrank_sparse2dense(
+	kspace::AbstractArray{<: T, 3}, # [readout, channel, phase encoding]
+	indices::AbstractVector{<: CartesianIndex{N}},
+	shape::NTuple{N, Integer},
+	VH::AbstractMatrix{<: Number}
+) where {N, T <: Number}
+	num_σ, num_dynamic = size(VH)
+	linear_indices = LinearIndices(shape)
+	perm = sortperm(indices; by=(k::CartesianIndex{N} -> linear_indices[k]))
+	backprojection = zeros(T, size(kspace, 1), size(kspace, 2), shape..., num_σ)
+	for i in eachindex(perm)
+		j = perm[i]
+		dynamic = mod1(j, num_dynamic)
+		k = indices[j]
+		for σ = 1:num_σ
+			@views backprojection[:, :, k, σ] += kspace[:, :, j] * VH[σ, dynamic]
+		end
+	end
+	return backprojection
+end
 
 
 
@@ -288,7 +321,7 @@ end
 """
 	plan_psf_regularised(n::Integer, A::LinearMap, P::LinearMap)
 	A = S' * F' * M * F * S, i.e. the PSF without the projection.
-	Note that M can be a low-rank mask, i.e. this acts on a vector
+	Note that M can be a low-rank mixing, i.e. this acts on a vector
 	in temporal low-rank image space.
 
 """
@@ -341,7 +374,7 @@ function admm(
 	match::Function, # Must support match(x) and match(x,y)
 	maxiter::Integer, # 48
 	cg_maxiter # 64
-)::NTuple{2, Vector{ComplexF64}}
+)
 	@assert maxiter > 0
 	# Do it specialised for MRF because P is not Vector in the implementation, but mathematically it is
 	# See Boyd2010
