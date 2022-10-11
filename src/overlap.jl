@@ -18,7 +18,7 @@ end
 	A::AbstractMatrix{<: Real},
 	x::AbstractMatrix{<: Real}
 )
-	@turbo for ai in axes(A, 1), xi in axes(x, 2)
+	@tturbo for ai in axes(A, 1), xi in axes(x, 2)
 		v = 0.0
 		for j in axes(A, 2)
 			v += A[ai, j] * x[j, xi]
@@ -33,7 +33,7 @@ end
 	x::NTuple{2, <: AbstractMatrix{<: Real}}
 )
 	x, z = x
-	@turbo for ai in axes(A, 1), xi in axes(x, 2) 
+	@tturbo for ai in axes(A, 1), xi in axes(x, 2)
 		v = 0.0
 		w = 0.0
 		for j in axes(A, 2)
@@ -51,7 +51,7 @@ end
 	A::AbstractMatrix{<: Real},
 	x::AbstractArray{<: Real, 3}
 )
-	@turbo for ai in axes(A, 1), xi in axes(x, 3)
+	@tturbo for ai in axes(A, 1), xi in axes(x, 3)
 		v_real = 0.0
 		v_imag = 0.0
 		for j in axes(A, 2)
@@ -72,7 +72,7 @@ end
 )
 	# No size assertions done!
 	x, z = x
-	@turbo for ai in axes(A, 1), xi in axes(x, 3)
+	@tturbo for ai in axes(A, 1), xi in axes(x, 3)
 		v_real = 0.0
 		v_imag = 0.0
 		w_real = 0.0
@@ -100,7 +100,7 @@ end
 	x::AbstractArray{<: Real, 3}
 )
 	# Mind the axis!
-	@turbo for ai in axes(A, 2), xi in axes(x, 3) # Make this loop structure a macro, then make several functions replacing the inner part
+	@tturbo for ai in axes(A, 2), xi in axes(x, 3) # Make this loop structure a macro, then make several functions replacing the inner part
 		v_real = 0.0
 		v_imag = 0.0
 		for j in axes(A, 3)
@@ -121,7 +121,7 @@ end
 )
 	# No size assertions done!
 	x, z = x
-	@turbo for ai in axes(A, 2), xi in axes(x, 3)
+	@tturbo for ai in axes(A, 2), xi in axes(x, 3)
 		v_real = 0.0
 		v_imag = 0.0
 		w_real = 0.0
