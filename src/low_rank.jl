@@ -53,9 +53,8 @@ function plan_lr2time(V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: N
 	# TODO: This could be done with @turbo
 	num_time, num_σ = size(V_conj)
 	@assert size(VT) == (num_σ, num_time)
-	input_dimension = num_σ * num_other
-	output_dimension = num_time * num_other
-	Λ = LinearMap{ComplexF64}(
+	Λ = LinearOperator(
+		(num_time * num_other, num_σ * num_other),
 		y -> begin
 			y = reshape(y, num_other, num_σ)
 			yt = y * VT
@@ -65,9 +64,7 @@ function plan_lr2time(V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: N
 			yt = reshape(yt, num_other, num_time)
 			y = yt * V_conj
 			vec(y)
-		end,
-		output_dimension,
-		input_dimension
+		end
 	)
 	return Λ
 end
@@ -78,15 +75,15 @@ end
 
 
 """
-	plan_lr2kt(L::LinearMap, F::LinearMap)
+	plan_lr2kt(L::AbstractLinearOperator, F::AbstractLinearOperator)
 
 """
-@inline plan_lr2kt(Λ::LinearMap, F::LinearMap) = Λ * F
+@inline plan_lr2kt(Λ::AbstractLinearOperator, F::AbstractLinearOperator) = Λ * F
 """
-	plan_lr2kt(L::LinearMap, F::LinearMap, S::LinearMap)
+	plan_lr2kt(L::AbstractLinearOperator, F::AbstractLinearOperator, S::AbstractLinearOperator)
 
 """
-@inline plan_lr2kt(Λ::LinearMap, F::LinearMap, S::LinearMap) = plan_lr2kt(Λ, F) * S
+@inline plan_lr2kt(Λ::AbstractLinearOperator, F::AbstractLinearOperator, S::AbstractLinearOperator) = plan_lr2kt(Λ, F) * S
 
 
 
@@ -137,63 +134,65 @@ end
 lr_mix[σ, σ, spatial dimensions]
 
 """
-function apply_lowrank_mixing(
+function apply_lowrank_mixing!(
+	ym::AbstractVector{C}, # is modified, same length as y
 	y::AbstractVector{C},
 	lr_mix::AbstractArray{<: Real, 3}, # Flat spatial dimension
 	ι::Integer,
 	κ::Integer
 ) where C <: Complex
+	@assert ym !== y
+	@assert length(ym) == length(y)
+	# TODO: check other dimensions
 	num_σ = size(lr_mix, 1)
-	num_x = size(lr_mix, 3)
-	# TODO: check shape
-	y = reshape(y, ι, num_x, κ, num_σ)
-	yd = decomplexify(y)
-	ymd = similar(yd) # y *m*ixed and *d*ecomplexified
-	@turbo for k = 1:κ, x = 1:num_x, i = 1:ι
+	num_spatial = size(lr_mix, 3)
+	(ym, y) = reshape.((ym, y), ι, num_spatial, κ, num_σ)
+	(ymd, yd) = decomplexify.((ym, y)) # y *m*ixed and *d*ecomplexified
+	@tturbo for k = 1:κ, i = 1:num_spatial, j = 1:ι
 		for σ2 = 1:num_σ
 			ym_real = 0.0
 			ym_imag = 0.0
 			for σ1 = 1:num_σ
-				ym_real += yd[1, i, x, k, σ1] * lr_mix[σ1, σ2, x]
-				ym_imag += yd[2, i, x, k, σ1] * lr_mix[σ1, σ2, x]
+				ym_real += yd[1, j, i, k, σ1] * lr_mix[σ1, σ2, i]
+				ym_imag += yd[2, j, i, k, σ1] * lr_mix[σ1, σ2, i]
 			end
-			ymd[1, i, x, k, σ2] = ym_real
-			ymd[2, i, x, k, σ2] = ym_imag
+			ymd[1, j, i, k, σ2] = ym_real
+			ymd[2, j, i, k, σ2] = ym_imag
 		end
 	end
-	ym = reinterpret(C, vec(ymd))
 	return ym
 end
-function apply_lowrank_mixing(
+function apply_lowrank_mixing!(
+	ym::AbstractVector{C}, # is modified, same length as y
 	y::AbstractVector{C},
 	lr_mix_d::AbstractArray{<: Real, 4},
 	ι::Integer,
 	κ::Integer
 ) where C <: Complex
+	@assert ym !== y
+	@assert length(ym) == length(y)
 	num_σ = size(lr_mix_d, 3)
-	num_x = size(lr_mix_d, 4)
-	y = reshape(y, readout_length, num_x, channels, num_σ)
-	yd = decomplexify(y)
-	ymd = similar(yd) # y *m*ixed and *d*ecomplexified
-	@tturbo for k = 1:κ, x = 1:num_x, i = 1:ι
+	num_spatial = size(lr_mix_d, 4)
+	(ym, y) = reshape.((ym, y), ι, num_spatial, κ, num_σ)
+	(ymd, yd) = decomplexify.((ym, y)) # y *m*ixed and *d*ecomplexified
+	@tturbo for k = 1:κ, i = 1:num_spatial, j = 1:ι
 		for σ2 = 1:num_σ
 			ym_real = 0.0
 			ym_imag = 0.0
 			for σ1 = 1:num_σ
 				ym_real += (
-					  yd[1, i, x, k, σ1] * lr_mix_d[1, σ1, σ2, x]
-					- yd[2, i, x, k, σ1] * lr_mix_d[2, σ1, σ2, x]
+					  yd[1, j, i, k, σ1] * lr_mix_d[1, σ1, σ2, i]
+					- yd[2, j, i, k, σ1] * lr_mix_d[2, σ1, σ2, i]
 				)
 				ym_imag += (
-					  yd[1, i, x, k, σ1] * lr_mix_d[2, σ1, σ2, x]
-					+ yd[2, i, x, k, σ1] * lr_mix_d[1, σ1, σ2, x]
+					  yd[1, j, i, k, σ1] * lr_mix_d[2, σ1, σ2, i]
+					+ yd[2, j, i, k, σ1] * lr_mix_d[1, σ1, σ2, i]
 				)
 			end
-			ymd[1, i, x, k, σ2] = ym_real
-			ymd[2, i, x, k, σ2] = ym_imag
+			ymd[1, j, i, k, σ2] = ym_real
+			ymd[2, j, i, k, σ2] = ym_imag
 		end
 	end
-	ym = reinterpret(C, vec(ymd))
 	return ym
 end
 
@@ -222,14 +221,17 @@ function plan_lowrank_mixing(lr_mix::AbstractArray{<: Number, N}, ι::Integer, �
 	num_phase_encode = prod(shape)
 	# Reshape and split real/imag
 	lr_mix = reshape(lr_mix, num_σ, num_σ, num_phase_encode) # It isn't copied
-	lr_mix_d = decomplexify(lr_mix)
+	lr_mix_d = decomplexify(lr_mix) # If lr_mix is real, this does nothing
+	# Allocate space
+	ym = Vector{ComplexF64}(undef, num_phase_encode * ι * κ * num_σ)
+	vec_ym = vec(ym)
 	# Define function
-	M = LinearMap{ComplexF64}(
-		y::AbstractVector{<: Complex} -> begin
-			apply_lowrank_mixing(y, lr_mix_d, ι, κ)
-		end,
+	M = HermitianOperator(
 		num_phase_encode * ι * κ * num_σ,
-		ishermitian=true
+		y -> begin
+			apply_lowrank_mixing!(ym, y, lr_mix_d, ι, κ)
+			vec_ym
+		end
 	)
 	return M
 end
@@ -252,6 +254,7 @@ function lowrank_sparse2dense(
 	shape::NTuple{N, Integer},
 	VH::AbstractMatrix{<: Number}
 ) where {N, T <: Number}
+	@assert length(indices) == size(kspace, 3)
 	num_σ, num_dynamic = size(VH)
 	linear_indices = LinearIndices(shape)
 	perm = sortperm(indices; by=(k::CartesianIndex{N} -> linear_indices[k]))
@@ -261,7 +264,8 @@ function lowrank_sparse2dense(
 		dynamic = mod1(j, num_dynamic)
 		k = indices[j]
 		for σ = 1:num_σ
-			@views backprojection[:, :, k, σ] += kspace[:, :, j] * VH[σ, dynamic]
+			backprojection[:, :, k, σ] += (@views @inbounds kspace[:, :, j] * VH[σ, dynamic])
+			# need to check if k is in bounds
 		end
 	end
 	return backprojection
@@ -288,8 +292,9 @@ function projection_matrix(
 	@assert size(DT_renorm, 1) == num_σ
 	num_D = size(DT_renorm, 2)
 
-	P = LinearMap{ComplexF64}(
-		x::AbstractVector{<: Complex} -> begin
+	P = HermitianOperator(
+		num_x * num_σ,
+		x -> begin
 			@assert all((i -> 0 <= i <= num_D), matches) # Zero is a forbidden index, in that case a zero filled vector will be returned
 			x = reshape(x, num_x, num_σ) # Weird: this has to be done before complexifying, otherwise the same error as in overlap!() with views
 			xd = decomplexify(x) # d for decomplexified
@@ -307,11 +312,8 @@ function projection_matrix(
 					xpd[2, xi, σ] = p_imag * DT_renorm[σ, match]
 				end
 			end
-			xp = reinterpret(C, vec(xpd))
-			xp
-		end,
-		num_x * num_σ,
-		ishermitian=true
+			xp = reinterpret(C, xpd)
+		end
 	)
 	return P
 end
@@ -319,17 +321,16 @@ end
 
 
 """
-	plan_psf_regularised(n::Integer, A::LinearMap, P::LinearMap)
+	plan_psf_regularised(A::HermitianOperator, P::HermitianOperator)
 	A = S' * F' * M * F * S, i.e. the PSF without the projection.
 	Note that M can be a low-rank mixing, i.e. this acts on a vector
 	in temporal low-rank image space.
 
 """
-function plan_psf_regularised(A::LinearMap, P::LinearMap, ρ::Real)
-	Ar = LinearMap{ComplexF64}(
-		(x -> A*x + ρ * (x - P*x)),
+function plan_psf_regularised(A::HermitianOperator, P::HermitianOperator, ρ::Real)
+	Ar = HermitianOperator(
 		size(A, 1),
-		ishermitian=true
+		x -> A*x + ρ * (x - P*x)
 	)
 	return Ar
 end
@@ -366,9 +367,9 @@ end
 """
 function admm(
 	b::AbstractVector{<: Complex}, # vec([spatial dimensions, singular component])
-	A::LinearMap, # PSF
-	Ar::LinearMap, # PSF regularised
-	P::LinearMap,
+	A::HermitianOperator, # PSF
+	Ar::HermitianOperator, # PSF regularised
+	P::HermitianOperator,
 	ρ::Real, # Weighting of dictionary regularisation term, in theory the weighting is ρ/2, but here just ρ is used!
 	matches::AbstractVector{<: Integer}, # is modified
 	match::Function, # Must support match(x) and match(x,y)

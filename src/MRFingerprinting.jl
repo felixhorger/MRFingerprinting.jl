@@ -2,7 +2,7 @@
 module MRFingerprinting
 
 	using LinearAlgebra
-	using LinearMaps
+	using LinearOperators
 	using LoopVectorization
 	using Statistics
 	using IterativeSolvers
