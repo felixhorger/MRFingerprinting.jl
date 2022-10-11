@@ -22,8 +22,8 @@ function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Nu
 			j += 1
 		end
 	end
-	if i <= i_max
-		c[i:end] .= length(target)
+	for j = i:i_max
+		@inbounds c[p[j]] = j_max
 	end
 	return c
 end
