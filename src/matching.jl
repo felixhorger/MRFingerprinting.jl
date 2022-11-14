@@ -3,27 +3,21 @@
 	closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
 
 Find indices of values in `target` which are closest to arbitrarily valued parameters `params`.
-Note that `target` must be sorted in ascending order.
 
 """
 function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
 	c = Vector{Int64}(undef, length(params))
-	p = sortperm(params)
-	i = 1
-	j = 1
-	i_max = length(params)
-	j_max = length(target)
-	@inbounds while j <= j_max && i <= i_max
-		k = p[i]
-		if params[k] < target[j]
-			c[k] = j
-			i += 1
-		else
-			j += 1
+	Threads.@threads for i in eachindex(params)
+		p = params[i]
+		local j
+		for outer j in eachindex(target)
+			target[j] > p && break
 		end
-	end
-	for j = i:i_max
-		@inbounds c[p[j]] = j_max
+		if j > 1 && abs(target[j] - p) > abs(target[j-1] - p)
+			c[i] = j-1
+		else
+			c[i] = j
+		end
 	end
 	return c
 end
