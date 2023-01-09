@@ -46,25 +46,31 @@ function convenient_Vs(VH::AbstractMatrix{<: Number})
 end
 
 
+
 """
 	num_other is everything except from dynamic
 """
-function plan_lr2time(V_conj::AbstractMatrix{<: Number}, VT::AbstractMatrix{<: Number}, num_other::Integer; dtype::Type=ComplexF64)
+function plan_lr2time(
+	V_conj::AbstractMatrix{<: Number},
+	VT::AbstractMatrix{<: Number},
+	num_other::Integer;
+	dtype::Type{T}=ComplexF64
+) where T <: Number
 	# TODO: This could be done with @turbo
 	num_time, num_σ = size(V_conj)
 	@assert size(VT) == (num_σ, num_time)
-	Λ = LinearOperator{dtype}(
+	Λ = LinearOperator{T}(
 		(num_time * num_other, num_σ * num_other),
-		y -> begin
-			y = reshape(y, num_other, num_σ)
-			yt = y * VT
-			vec(yt)
+		(yt, y) -> begin
+			mul!(reshape(yt, num_other, num_time), reshape(y, num_other, num_σ), VT)
+			yt
+		end;
+		adj = (x, xt) -> begin
+			mul!(reshape(x, num_other, num_σ), reshape(xt, num_other, num_time), V_conj)
+			x
 		end,
-		yt -> begin
-			yt = reshape(yt, num_other, num_time)
-			y = yt * V_conj
-			vec(y)
-		end
+		out=Vector{T}(undef, num_other * num_time),
+		out_adj_inv=Vector{T}(undef, num_other * num_σ)
 	)
 	return Λ
 end
@@ -153,22 +159,33 @@ lr_mix[spatial dimensions, σ, σ]
 
 """
 function apply_lowrank_mixing!(
+	ym::AbstractArray{C, 4},
+	y::AbstractArray{C, 4},
+	lr_mix::AbstractArray{<: Real, N}, # (potentially complex axis) spatial, σ, σ
+	ι::Integer,
+	κ::Integer
+) where {C <: Complex, N}
+	@assert pointer(ym) !== pointer(y)
+	@assert size(ym) == size(y)
+	@assert size(ym, 4) == size(lr_mix, N)
+	(ymd, yd) = decomplexify.((ym, y))
+	apply_lowrank_mixing!(ymd, yd, lr_mix, ι, κ)
+	return ym
+end
+function apply_lowrank_mixing!(
 	ymd::AbstractArray{R, 5},
 	yd::AbstractArray{R, 5},
 	lr_mix::AbstractArray{<: Real, 3}, # spatial, σ, σ
 	ι::Integer,
 	κ::Integer
 ) where R <: Real
-	@assert ymd !== yd
-	@assert length(ymd) == length(yd)
-	# TODO: check other dimensions
-	num_σ = size(lr_mix, 3)
 	num_spatial = size(lr_mix, 1)
+	num_σ = size(lr_mix, 3)
 	@tturbo for i in 1:length(ymd) # Cannot use eachindex because ymd is ReinterpretArray, not nice, my opinion
 		ymd[i] = 0
 	end
 	for σ2 = 1:num_σ, σ1 = 1:num_σ
-		Threads.@threads for k = 1:κ
+		Threads.@threads for k = 1:κ # TODO: This doesn't seem optimal, yet experimentally gives best performance
 			@turbo for i = 1:num_spatial
 				l = lr_mix[i, σ1, σ2]
 				for j = 1:ι
@@ -187,10 +204,8 @@ function apply_lowrank_mixing!(
 	ι::Integer,
 	κ::Integer
 ) where R <: Real
-	@assert ymd !== yd
-	@assert length(ymd) == length(yd)
-	num_σ = size(lr_mix_d, 4)
 	num_spatial = size(lr_mix_d, 2)
+	num_σ = size(lr_mix_d, 3)
 	@tturbo for i in 1:length(ymd) # Cannot use eachindex because ymd is ReinterpretArray, not nice, my opinion
 		ymd[i] = 0
 	end
@@ -239,24 +254,20 @@ function plan_lowrank_mixing(lr_mix::AbstractArray{<: Number, N}, ι::Integer, �
 	shape = lr_mix_shape[1:N-2]
 	num_phase_encode = prod(shape)
 	# Reshape and split real/imag
-	lr_mix_d = decomplexify(reshape(lr_mix, num_phase_encode, num_σ, num_σ))
-	# Note: If lr_mix is real, this does nothing
-	# Allocate space
-	ym = Array{C, 4}(undef, ι, num_phase_encode, κ, num_σ)
-	vec_ym = vec(ym)
-	ymd = decomplexify(ym)
+	lr_mix_d = decomplexify(reshape(lr_mix, num_phase_encode, num_σ, num_σ)) # If lr_mix is real, this does nothing
 	# Define function
 	M = HermitianOperator{C}(
 		num_phase_encode * ι * κ * num_σ,
-		y -> begin
+		(ym, y) -> begin
 			apply_lowrank_mixing!(
-				ymd,
-				decomplexify(reshape(y, ι, num_phase_encode, κ, num_σ)),
+				reshape(ym, ι, num_phase_encode, κ, num_σ),
+				reshape(y, ι, num_phase_encode, κ, num_σ),
 				lr_mix_d,
 				ι, κ
 			)
-			vec_ym
-		end
+			ym
+		end;
+		out=Vector{C}(undef, ι * num_phase_encode * κ * num_σ)
 	)
 	return M
 end
@@ -321,26 +332,23 @@ function prepare_lowrank_toeplitz_embedding(F_double_fov::LinearOperator{T}, lr_
 	return x_padded, y_padded, Fm_d, F, FH_unnormalised
 end
 
-# TODO: put to masking
-@inline double_fov_offset(i::Integer) = (i ÷ 2) + mod(i, 2)
-
 function apply_lowrank_toeplitz_embedding!(
-	y_d::AbstractArray{R, N},
-	x_d::AbstractArray{R, N},
-	x_padded::AbstractArray{T, M},
-	y_padded::AbstractArray{T, M},
-	Fm_d::AbstractArray{R, K},
+	y::AbstractArray{T, N},
+	x::AbstractArray{T, N},
+	x_padded::AbstractArray{T, N},
+	y_padded::AbstractArray{T, N},
+	Fm_d::AbstractArray{<: Real, K},
 	F::FFTW.cFFTWPlan,
 	FH_unnormalised::FFTW.cFFTWPlan
-) where {R <: Real, T <: Complex{R}, N, M, K}
+) where {T <: Complex, N, K}
 	# Dimensions and checks
-	@assert M == N - 1
-	shape = size(x_d)[2:N-2] # First axis is length 2, decomplexified
-	double_shape = size(x_padded)[1:M-2]
-	num_other, num_σ = size(x_d)[N-1:N]
-	@assert (num_other, num_σ) == size(x_padded)[M-1:M]
+	shape = size(x)[1:N-2] # First axis is length 2, decomplexified
+	double_shape = size(x_padded)[1:N-2]
+	num_other, num_σ = size(x)[N-1:N]
+	@assert (num_other, num_σ) == size(x_padded)[N-1:N]
 	@assert K ∈ (3, 4)
 	# Reshape and decomplexify arrays
+	(x_d, y_d) = decomplexify.((x, y))
 	(x_padded_d, y_padded_d) = decomplexify.((x_padded, y_padded))
 	(x_padded_flat, y_padded_flat) = reshape.(
 		(x_padded, y_padded),
@@ -352,10 +360,10 @@ function apply_lowrank_toeplitz_embedding!(
 		x_padded_d[i] = 0
 	end
 	# Pad x into x_padded
-	zero_offset = Tuple(0 for _ = 1:N)
-	offset = (0, double_fov_offset.(shape)..., 0, 0)
+	zero_offset = Tuple(0 for _ = 1:N+1)
+	offset = (0, MRIRecon.centre_offset.(shape)..., 0, 0)
 	shape_d = (2, shape..., num_other, num_σ)
-	turbo_block_copyto!(x_padded_d, x_d, shape_d, offset, zero_offset)
+	MRIRecon.turbo_block_copyto!(x_padded_d, x_d, shape_d, offset, zero_offset)
 	# Fourier transform x_padded
 	F * x_padded # In-place
 	# Apply low-rank mixing
@@ -363,9 +371,10 @@ function apply_lowrank_toeplitz_embedding!(
 	# Fourier transform back
 	FH_unnormalised * y_padded # In-place
 	# Crop into y
-	turbo_block_copyto!(y_d, y_padded_d, shape_d, zero_offset, offset)
-	return y_d
+	MRIRecon.turbo_block_copyto!(y_d, y_padded_d, shape_d, zero_offset, offset)
+	return y
 end
+
 """
 F_double_fov includes all non-Cartesian dimensions
 """
@@ -379,21 +388,15 @@ function plan_lowrank_toeplitz_embedding(y::AbstractArray{T, N}, F_double_fov::L
 		lr_mix,
 		shape, num_other
 	)
-	y_d = decomplexify(y)
-	vec_y = vec(y)
 	# Define convolution operator
 	FHMF = HermitianOperator{T}(
 		length(y),
-		x -> begin
-			apply_lowrank_toeplitz_embedding!(
-				y_d,
-				decomplexify(reshape(x, shape..., num_other, num_σ)),
-				x_padded, y_padded,
-				Fm_d,
-				F, FH_unnormalised
-			)
-			vec_y
-		end
+		(y, x) -> begin
+			(ys, xs) = reshape.((y, x), shape..., num_other, num_σ)
+			apply_lowrank_toeplitz_embedding!(ys, xs, x_padded, y_padded, Fm_d, F, FH_unnormalised)
+			y
+		end;
+		out=vec(y)
 	)
 	return FHMF
 end
@@ -401,7 +404,7 @@ end
 """
 In place, be careful with conjugate gradient
 """
-function plan_lowrank_toeplitz_embedding(F_double_fov::LinearOperator, lr_mix::AbstractArray{<: Number, 3}, shape::NTuple{D, Integer}, num_other::Integer; kwargs...) where {T, N, D}
+function plan_lowrank_toeplitz_embedding(shape::NTuple{D, Integer}, num_other::Integer, F_double_fov::LinearOperator{T}, lr_mix::AbstractArray{<: Number, 3}; kwargs...) where {T <: Number, D}
 	num_σ = size(lr_mix, 2)
 	@assert num_σ == size(lr_mix, 3)
 	x_padded, y_padded, Fm_d, F, FH_unnormalised = prepare_lowrank_toeplitz_embedding(
@@ -410,16 +413,12 @@ function plan_lowrank_toeplitz_embedding(F_double_fov::LinearOperator, lr_mix::A
 		shape, num_other
 	)
 	# Define convolution operator
-	FHMF = HermitianOperator(
+	FHMF = HermitianOperator{T}(
 		prod(shape) * num_other * num_σ,
-		x -> begin
-			x_d = decomplexify(reshape(x, shape..., num_other, num_σ))
-			apply_lowrank_toeplitz_embedding!(
-				x_d, x_d,
-				x_padded, y_padded,
-				Fm_d,
-				F, FH_unnormalised
-			)
+		(y, x) -> begin
+			@assert length(y) == 0
+			z = reshape(x, shape..., num_other, num_σ)
+			apply_lowrank_toeplitz_embedding!(z, z, x_padded, y_padded, Fm_d, F, FH_unnormalised)
 			x
 		end
 	)

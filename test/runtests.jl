@@ -44,22 +44,21 @@ lr_mix = MRF.lowrank_mixing(VH, spoke_indices, (num_angles,))
 num_channels = 10
 #
 # Low-rank mixing
-ym = Vector{ComplexF64}(undef, num_columns * num_angles * num_channels * num_σ);
+ym = Array{ComplexF64, 4}(undef, num_columns, num_angles, num_channels, num_σ);
 y = rand(ComplexF64, num_columns, num_angles, num_channels, num_σ);
 y_vec = vec(y)
 lr_mix_d = MRF.decomplexify(lr_mix)
 lr_mix_d_c = MRF.decomplexify(convert.(ComplexF64, lr_mix))
 #
-MRF.apply_lowrank_mixing!(ym, y_vec, lr_mix_d, num_columns, num_channels)
-MRF.apply_lowrank_mixing!(ym, y_vec, lr_mix_d, num_columns, num_channels)
-#
+MRF.apply_lowrank_mixing!(ym, y, lr_mix_d, num_columns, num_channels)
+MRF.apply_lowrank_mixing!(ym, y, lr_mix_d_c, num_columns, num_channels)
+# Non-optimised method
 L = MRF.plan_lr2time(transpose(VH), conj.(VH), num_columns * num_angles * num_channels)
 M = MRIRecon.plan_masking(spoke_indices, (num_columns, num_angles, num_channels, num_time))
 #
-# Non-optimised method
 ym2 = L' * M * L * y_vec
-@assert ym2 ≈ ym
-
+# Check equality
+@assert ym2 ≈ vec(ym)
 
 
 # Low-rank Toeplitz Embedding
@@ -76,7 +75,7 @@ total_num_spokes = spokes_per_timepoint * num_time
 φ, spoke_indices = MRITrajectories.sort_angles!(φ, spoke_indices, spokes_per_timepoint, num_time)
 spoke_indices = CartesianIndex.(MRITrajectories.chronological_order(spoke_indices))
 lr_mix = MRF.lowrank_mixing(VH, spoke_indices, (num_angles,))
-num_channels = 10 * 192
+num_channels = 1 * 192
 #
 F_double_fov = MRIRecon.plan_fourier_transform(k[1, :], k[2, :], (2num_columns, 2num_lines, 1); modeord=1)
 F = MRIRecon.plan_fourier_transform(k[1, :], k[2, :], (num_columns, num_lines, num_channels * num_σ))
@@ -92,6 +91,9 @@ GC.gc(true)
 
 T = MRF.plan_lowrank_toeplitz_embedding(y, F_double_fov, lr_mix)
 GC.gc(true)
+
+@benchmark reshape($T * $vec_x, $num_columns, $num_lines, $num_channels, $num_σ) samples=1 seconds=40 evals=1
+@benchmark reshape($A * $vec_x, $num_columns, $num_lines, $num_channels, $num_σ) samples=4 seconds=40
 
 @time z1 = reshape(T * vec_x, num_columns, num_lines, num_channels, num_σ);
 @time z2 = reshape(A * vec_x, num_columns, num_lines, num_channels, num_σ);
@@ -116,9 +118,6 @@ fig, axs = plt.subplots(3, 5, sharex=true, sharey=true)
 	image = axs[3, σ].imshow(a3; vmin=0, vmax=vmax*1e-8)
 	PyPlotTools.add_colourbar(fig, axs[3, σ], image)
 end
-
-@btime ($T * $vec_x) samples=3;
-@btime ($A * $vec_x) seconds=3;
 
 
 x_padded, vec_x_padded, F, FH_unnormalised, M, centre_indices = MRF.prepare_lowrank_toeplitz_embedding(F_double_fov, lr_mix, shape, num_channels)
