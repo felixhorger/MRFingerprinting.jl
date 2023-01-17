@@ -404,7 +404,7 @@ end
 """
 In place, be careful with conjugate gradient
 """
-function plan_lowrank_toeplitz_embedding(shape::NTuple{D, Integer}, num_other::Integer, F_double_fov::LinearOperator{T}, lr_mix::AbstractArray{<: Number, 3}; kwargs...) where {T <: Number, D}
+function plan_lowrank_toeplitz_embedding!(shape::NTuple{D, Integer}, num_other::Integer, F_double_fov::LinearOperator{T}, lr_mix::AbstractArray{<: Number, 3}; kwargs...) where {T <: Number, D}
 	num_σ = size(lr_mix, 2)
 	@assert num_σ == size(lr_mix, 3)
 	x_padded, y_padded, Fm_d, F, FH_unnormalised = prepare_lowrank_toeplitz_embedding(
