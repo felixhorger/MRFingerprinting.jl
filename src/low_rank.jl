@@ -7,7 +7,7 @@
 	Of course works for any time domain array
 """
 function time2lr(xt::AbstractArray{<: Number, N}, V_conj::AbstractMatrix{<: Number}) where N
-	# TODO: This could be done with @turbo
+	# TODO: optimise: mul!, turbo,...
 	shape = size(xt)
 	xt = reshape(xt, :, shape[N])
 	x = xt * V_conj
@@ -23,6 +23,7 @@ function kt2klr(
 	shape::NTuple{N, Integer},
 	indices::AbstractVector{<: CartesianIndex{N}}
 ) where N
+	error("untested")
 	@assert all(size(x, 3) .== length.(indices))
 	@assert all(all(0 .< indices[d] .<= shape[d]) for d ∈ 1:N)
 	timepoints = size(VH, 2)
@@ -46,20 +47,23 @@ function convenient_Vs(VH::AbstractMatrix{<: Number})
 end
 
 
+lowrank2time_size(num_time::Integer, num_σ::Integer, num_other::Integer) = (num_other * num_time, num_other * num_σ)
 
 """
 	num_other is everything except from dynamic
 """
-function plan_lr2time(
+function plan_lowrank2time(
 	V_conj::AbstractMatrix{<: Number},
 	VT::AbstractMatrix{<: Number},
 	num_other::Integer;
-	dtype::Type{T}=ComplexF64
+	dtype::Type{T}=ComplexF64,
+	Lx::AbstractVector{<: T}=empty(Vector{dtype}),
+	LHy::AbstractVector{<: T}=empty(Vector{dtype})
 ) where T <: Number
-	# TODO: This could be done with @turbo
+	# TODO: This could be done with @turbo, but this should be fast enough
 	num_time, num_σ = size(V_conj)
 	@assert size(VT) == (num_σ, num_time)
-	Λ = LinearOperator{T}(
+	L = LinearOperator{T}(
 		(num_time * num_other, num_σ * num_other),
 		(yt, y) -> begin
 			mul!(reshape(yt, num_other, num_time), reshape(y, num_other, num_σ), VT)
@@ -69,10 +73,10 @@ function plan_lr2time(
 			mul!(reshape(x, num_other, num_σ), reshape(xt, num_other, num_time), V_conj)
 			x
 		end,
-		out=Vector{T}(undef, num_other * num_time),
-		out_adj_inv=Vector{T}(undef, num_other * num_σ)
+		out=check_allocate(Lx, num_other * num_time),
+		out_adj_inv=check_allocate(LHy, num_other * num_σ)
 	)
-	return Λ
+	return L
 end
 
 
@@ -82,33 +86,89 @@ end
 	plan_lr2kt(L::AbstractLinearOperator, F::AbstractLinearOperator)
 
 """
-@inline plan_lr2kt(Λ::AbstractLinearOperator, F::AbstractLinearOperator) = Λ * F
+@inline plan_lr2kt(L::AbstractLinearOperator, F::AbstractLinearOperator) = L * F
 """
 	plan_lr2kt(L::AbstractLinearOperator, F::AbstractLinearOperator, S::AbstractLinearOperator)
 
 """
-@inline plan_lr2kt(Λ::AbstractLinearOperator, F::AbstractLinearOperator, S::AbstractLinearOperator) = plan_lr2kt(Λ, F) * S
+@inline plan_lr2kt(L::AbstractLinearOperator, F::AbstractLinearOperator, S::AbstractLinearOperator) = plan_lr2kt(L, F) * S
 
 
+function lowrank_sparse2dense_parallel(
+	kspace::AbstractArray{<: T, 3}, # [readout, channel, phase encoding]
+	indices::AbstractVector{<: CartesianIndex{N}},
+	shape::NTuple{N, Integer},
+	V_conj::AbstractMatrix{<: Number}
+) where {N, T <: Number}
+	@assert length(indices) == size(kspace, 3)
+	num_dynamic, num_σ = size(V_conj)
+	# Check k
+	for k in indices
+		if one(CartesianIndex{N}) > k > CartesianIndex(shape)
+			error("Sampling index is not within given shape")
+			return Array{T, N+3}(undef, (0 for _ = 1:N+3)...) # for type stability, other solution?
+		end
+	end
+	# Allocate output, needs zeros since accumulation
+	backprojection = Array{T, N+3}(undef, size(kspace, 1), size(kspace, 2), shape..., num_σ)
+	turbo_wipe!(backprojection)
+	# Split indices thread-safely
+	num_threads = Threads.nthreads()
+	split_indices = ThreadTools.safe_split_threads(
+		[CartesianIndex{N+1}(Tuple(I)..., i) for (i, I) in enumerate(indices)],
+		(1, 2),
+		num_threads
+	)
+	# Run in parallel
+	Threads.@threads for t = 1:num_threads
+		@inbounds let split_indices = split_indices[t]
+			for σ = 1:num_σ
+				for K in split_indices
+					k = CartesianIndex(Tuple(K)[1:N])
+					i = K[N+1]
+					dynamic = mod1(i, num_dynamic)
+					for c in axes(backprojection, 2), r in axes(backprojection, 1)
+						backprojection[r, c, k, σ] += kspace[r, c, i] * V_conj[dynamic, σ]
+					end
+				end
+			end
+		end
+	end
+	return backprojection
+end
 
+# TODO: remove
 function lowrank_sparse2dense(
 	kspace::AbstractArray{<: T, 3}, # [readout, channel, phase encoding]
 	indices::AbstractVector{<: CartesianIndex{N}},
 	shape::NTuple{N, Integer},
-	VH::AbstractMatrix{<: Number}
+	V_conj::AbstractMatrix{<: Number}
 ) where {N, T <: Number}
+	error("Obsolete, use parallel version")
 	@assert length(indices) == size(kspace, 3)
-	num_σ, num_dynamic = size(VH)
+	num_dynamic, num_σ = size(V_conj)
+	# Check k
+	for k in indices
+		if one(CartesianIndex{N}) > k > CartesianIndex(shape)
+			error("Sampling index is not within given shape")
+			return Array{T, N+3}(undef, (0 for _ = 1:N+3)...) # for type stability, other solution?
+		end
+	end
+	# Allocate output, needs zeros since accumulation
+	backprojection = Array{T, N+3}(undef, size(kspace, 1), size(kspace, 2), shape..., num_σ)
+	turbo_wipe!(backprojection)
+	# Set up indices
 	linear_indices = LinearIndices(shape)
 	perm = sortperm(indices; by=(k::CartesianIndex{N} -> linear_indices[k]))
-	backprojection = zeros(T, size(kspace, 1), size(kspace, 2), shape..., num_σ)
-	for i in eachindex(perm)
-		j = perm[i]
-		dynamic = mod1(j, num_dynamic)
-		k = indices[j]
-		for σ = 1:num_σ
-			backprojection[:, :, k, σ] += (@views @inbounds kspace[:, :, j] * VH[σ, dynamic])
-			# need to check if k is in bounds
+	@inbounds for σ = 1:num_σ
+		for i in eachindex(perm)
+			j = perm[i]
+			dynamic = mod1(j, num_dynamic)
+			k = indices[j]
+			# TODO: turbo
+			for c in axes(backprojection, 2), r in axes(backprojection, 1)
+				backprojection[r, c, k, σ] += kspace[r, c, j] * V_conj[dynamic, σ]
+			end
 		end
 	end
 	return backprojection
@@ -162,22 +222,22 @@ function apply_lowrank_mixing!(
 	ym::AbstractArray{C, 4},
 	y::AbstractArray{C, 4},
 	lr_mix::AbstractArray{<: Real, N}, # (potentially complex axis) spatial, σ, σ
-	ι::Integer,
-	κ::Integer
+	num_before::Integer,
+	num_after::Integer
 ) where {C <: Complex, N}
 	@assert pointer(ym) !== pointer(y)
 	@assert size(ym) == size(y)
 	@assert size(ym, 4) == size(lr_mix, N)
 	(ymd, yd) = decomplexify.((ym, y))
-	apply_lowrank_mixing!(ymd, yd, lr_mix, ι, κ)
+	apply_lowrank_mixing!(ymd, yd, lr_mix, num_before, num_after)
 	return ym
 end
 function apply_lowrank_mixing!(
 	ymd::AbstractArray{R, 5},
 	yd::AbstractArray{R, 5},
 	lr_mix::AbstractArray{<: Real, 3}, # spatial, σ, σ
-	ι::Integer,
-	κ::Integer
+	num_before::Integer,
+	num_after::Integer
 ) where R <: Real
 	num_spatial = size(lr_mix, 1)
 	num_σ = size(lr_mix, 3)
@@ -185,10 +245,10 @@ function apply_lowrank_mixing!(
 		ymd[i] = 0
 	end
 	for σ2 = 1:num_σ, σ1 = 1:num_σ
-		Threads.@threads for k = 1:κ # TODO: This doesn't seem optimal, yet experimentally gives best performance
+		Threads.@threads for k = 1:num_after # TODO: This doesn't seem optimal, yet experimentally gives best performance
 			@turbo for i = 1:num_spatial
 				l = lr_mix[i, σ1, σ2]
-				for j = 1:ι
+				for j = 1:num_before
 					ymd[1, j, i, k, σ2] += yd[1, j, i, k, σ1] * l
 					ymd[2, j, i, k, σ2] += yd[2, j, i, k, σ1] * l
 				end
@@ -201,8 +261,8 @@ function apply_lowrank_mixing!(
 	ymd::AbstractArray{R, 5},
 	yd::AbstractArray{R, 5},
 	lr_mix_d::AbstractArray{<: Real, 4}, # complex, spatial, σ, σ
-	ι::Integer,
-	κ::Integer
+	num_before::Integer,
+	num_after::Integer
 ) where R <: Real
 	num_spatial = size(lr_mix_d, 2)
 	num_σ = size(lr_mix_d, 3)
@@ -210,11 +270,11 @@ function apply_lowrank_mixing!(
 		ymd[i] = 0
 	end
 	for σ2 = 1:num_σ, σ1 = 1:num_σ
-		Threads.@threads for k = 1:κ
+		Threads.@threads for k = 1:num_after
 			@turbo for i = 1:num_spatial
 				l_re = lr_mix_d[1, i, σ1, σ2]
 				l_im = lr_mix_d[2, i, σ1, σ2]
-				for j = 1:ι
+				for j = 1:num_before
 					ymd[1, j, i, k, σ2] += (
 						  yd[1, j, i, k, σ1] * l_re
 						- yd[2, j, i, k, σ1] * l_im
@@ -233,20 +293,31 @@ end
 
 
 """
+Provide all dimensions of the k-σ domain
+"""
+lowrank_mixing_dim(shape::Integer...) = prod(shape)
+
+"""
 
 lr_mix[spatial dimensions..., σ1, σ2]
 lr_mix not copied
 
-ι,κ = number of elements in the first,last spatial dimension of y
+num_before,num_after = number of elements in the first,last spatial dimension of y
 which is assumed to be acquires at the same time.
 For example: 3D Cartesian imaging would have dimensions (num_lines, num_partitions, num_readouts)
-where readouts can be Fourier transformed beforehand. In this case ι = 1 and κ = num_readouts.
+where readouts can be Fourier transformed beforehand. In this case num_before = 1 and num_after = num_readouts.
 For stack of stars with fully sampled partition direction, (num_columns, num_lines, num_partitions)
-is more favourable, so ι = num_columns and κ = num_partitions.
-For multi-channel data, the number of channels and κ can be fused.
+is more favourable, so num_before = num_columns and num_after = num_partitions.
+For multi-channel data, the number of channels and num_after can be fused.
 
 """
-function plan_lowrank_mixing(lr_mix::AbstractArray{<: Number, N}, ι::Integer, κ::Integer; dtype::Type{C}=ComplexF64) where {N, C <: Number}
+function plan_lowrank_mixing(
+	lr_mix::AbstractArray{<: Number, N},
+	num_before::Integer,
+	num_after::Integer;
+	dtype::Type{C}=ComplexF64,
+	Mx::AbstractVector{<: C}=empty(Vector{dtype})
+) where {N, C <: Number}
 	# Get and check shapes
 	lr_mix_shape = size(lr_mix)
 	num_σ = lr_mix_shape[N]
@@ -257,17 +328,17 @@ function plan_lowrank_mixing(lr_mix::AbstractArray{<: Number, N}, ι::Integer, �
 	lr_mix_d = decomplexify(reshape(lr_mix, num_phase_encode, num_σ, num_σ)) # If lr_mix is real, this does nothing
 	# Define function
 	M = HermitianOperator{C}(
-		num_phase_encode * ι * κ * num_σ,
+		num_phase_encode * num_before * num_after * num_σ,
 		(ym, y) -> begin
 			apply_lowrank_mixing!(
-				reshape(ym, ι, num_phase_encode, κ, num_σ),
-				reshape(y, ι, num_phase_encode, κ, num_σ),
+				reshape(ym, num_before, num_phase_encode, num_after, num_σ),
+				reshape(y, num_before, num_phase_encode, num_after, num_σ),
 				lr_mix_d,
-				ι, κ
+				num_before, num_after
 			)
 			ym
 		end;
-		out=Vector{C}(undef, ι * num_phase_encode * κ * num_σ)
+		out=check_allocate(Mx, num_before * num_phase_encode * num_after * num_σ)
 	)
 	return M
 end
@@ -278,61 +349,16 @@ function plan_lowrank_mixing(
 	VT::AbstractMatrix{<: Number},
 	indices::AbstractVector{<: CartesianIndex{N}},
 	shape::NTuple{N, Integer},
-	ι::Integer,
-	κ::Integer,
+	num_before::Integer,
+	num_after::Integer,
 ) where N
 	lr_mix = lowrank_mixing(VT, indices, shape)
-	return plan_lowrank_mixing(lr_mix, ι, κ)
+	return plan_lowrank_mixing(lr_mix, num_before, num_after)
 end
 
 
-"""
-	shape = spatial target shape
-	not side-effect free
-	mutates x
-"""
-function prepare_lowrank_toeplitz_embedding(F_double_fov::LinearOperator{T}, lr_mix::AbstractArray{<: Number, 3}, shape::NTuple{D, Integer}, num_other::Integer; kwargs...) where {T <: Complex, D}
-	double_shape = 2 .* shape
-	num_double_fov = size(F_double_fov, 2)
-	@assert prod(double_shape) == num_double_fov
-	num_σ = size(lr_mix, 2)
-	@assert num_σ == size(lr_mix, 3)
-	num_phase_encode = size(lr_mix, 1)
-	num_columns, remainder_columns = divrem(size(F_double_fov, 1), num_phase_encode)
-	@assert remainder_columns == 0
 
-	m = Array{T, 3}(undef, size(F_double_fov, 2), num_σ, num_σ)
-	let tmp = Matrix{T}(undef, num_columns, num_phase_encode), tmp_vec = vec(tmp)
-		# Compute one half including diagonal
-		for σ1 = 1:num_σ, σ2 = 1:σ1
-			# Repeat array along readout direction
-			for p = 1:num_phase_encode
-				@views tmp[:, p] .= lr_mix[p, σ2, σ1]
-			end
-			# Apply adjoint
-			@views m[:, σ2, σ1] .= F_double_fov' * tmp_vec
-		end
-		# Copy other half (without diagonal)
-		for σ1 = 1:num_σ, σ2 = σ1+1:num_σ
-			@views m[:, σ2, σ1] .= m[:, σ1, σ2]
-		end
-	end
-
-	# Precompute kernel, i.e. mixing matrices in new, Cartesian k-space
-	Fm = fft(reshape(m, double_shape..., num_σ, num_σ), 1:D) ./ prod(shape) # include fft normalisation
-	Fm_d = decomplexify(reshape(Fm, num_double_fov, num_σ, num_σ))
-
-	# Array for padding input vector and array for intermediate step
-	x_padded = Array{T, D+2}(undef, double_shape..., num_other, num_σ)
-	y_padded = similar(x_padded)
-
-	# Plan Fourier and low-rank mixing
-	F = plan_fft!(x_padded, 1:D; kwargs...)
-	FH_unnormalised = plan_bfft!(x_padded, 1:D; kwargs...) # Normalisation in Fm
-	return x_padded, y_padded, Fm_d, F, FH_unnormalised
-end
-
-function apply_lowrank_toeplitz_embedding!(
+function apply_lowrank_toeplitz!(
 	y::AbstractArray{T, N},
 	x::AbstractArray{T, N},
 	x_padded::AbstractArray{T, N},
@@ -356,9 +382,7 @@ function apply_lowrank_toeplitz_embedding!(
 	)
 	(x_padded_flat_d, y_padded_flat_d) = decomplexify.((x_padded_flat, y_padded_flat))
 	# Zero fill padded array
-	@tturbo for i = 1:length(x_padded_d)
-		x_padded_d[i] = 0
-	end
+	turbo_wipe!(x_padded_d)
 	# Pad x into x_padded
 	zero_offset = Tuple(0 for _ = 1:N+1)
 	offset = (0, MRIRecon.centre_offset.(shape)..., 0, 0)
@@ -375,25 +399,114 @@ function apply_lowrank_toeplitz_embedding!(
 	return y
 end
 
+function lowrank_toeplitz_padded_size(shape::NTuple{N, Integer}, num_other::Integer, num_σ::Integer) where N
+	return ((2 .* shape)..., num_other, num_σ)
+end
+
+function lowrank_toeplitz_kernel(
+	shape::NTuple{D, Integer},
+	F_double_fov::LinearOperator{T},
+	lr_mix::AbstractArray{<: Number, 3}
+) where {T <: Complex, D}
+	num_phase_encode = size(lr_mix, 1)
+	num_σ = size(lr_mix, 2)
+	num_columns, remainder_columns = divrem(size(F_double_fov, 1), num_phase_encode)
+	@assert remainder_columns == 0
+	double_shape = 2 .* shape
+	@assert prod(double_shape) == size(F_double_fov, 2)
+
+	m = Array{T, 3}(undef, size(F_double_fov, 2), num_σ, num_σ)
+	let tmp = Matrix{T}(undef, num_columns, num_phase_encode), tmp_vec = vec(tmp)
+		F_double_fov_adj = F_double_fov'
+		# Compute one half including diagonal
+		for σ1 = 1:num_σ, σ2 = 1:σ1
+			# Repeat array along readout direction
+			for p = 1:num_phase_encode
+				@views tmp[:, p] .= lr_mix[p, σ2, σ1]
+			end
+			# Apply adjoint
+			@views m[:, σ2, σ1] .= F_double_fov_adj * tmp_vec
+		end
+		# Copy other half (without diagonal)
+		for σ1 = 1:num_σ, σ2 = σ1+1:num_σ
+			@views m[:, σ2, σ1] .= m[:, σ1, σ2]
+		end
+	end
+
+	# Precompute kernel, i.e. mixing matrices in new, Cartesian k-space
+	Fm = fft(reshape(m, double_shape..., num_σ, num_σ), 1:D) ./ prod(shape) # include fft normalisation
+	return Fm
+end
+
+
 """
-F_double_fov includes all non-Cartesian dimensions
+	shape = spatial target shape
+	not side-effect free
+	mutates x
 """
-function plan_lowrank_toeplitz_embedding(y::AbstractArray{T, N}, F_double_fov::LinearOperator{T}, lr_mix::AbstractArray{<: Number, 3}; kwargs...) where {T <: Complex, N}
+function prepare_lowrank_toeplitz(
+	shape::NTuple{D, Integer},
+	num_other::Integer,
+	F_double_fov::LinearOperator{T},
+	lr_mix::AbstractArray{<: Number, 3},
+	x_padded::AbstractArray{<: T, N},
+	y_padded::AbstractArray{<: T, N};
+	kwargs...
+) where {T <: Complex, N, D}
+	double_shape = lowrank_toeplitz_padded_size(shape, num_other, num_σ)
+	num_σ = size(lr_mix, 2)
+
+	# Precompute kernel, i.e. mixing matrices in new, Cartesian k-space
+	Fm = lowrank_toeplitz_kernel(shape, F_double_fov, lr_mix)
+	Fm_d = decomplexify(reshape(Fm, num_double_fov, num_σ, num_σ))
+
+	# Array for padding input vector and array for intermediate step
+	x_padded = check_allocate(x_padded, double_shape)
+	y_padded = check_allocate(y_padded, double_shape)
+
+	# Plan Fourier and low-rank mixing
+	F = plan_fft!(x_padded, 1:D; kwargs...)
+	FH_unnormalised = plan_bfft!(x_padded, 1:D; kwargs...) # Normalisation in Fm
+	return Fm_d, F, FH_unnormalised, x_padded, y_padded
+end
+
+# TODO: Split this into individual operators and then make function that combines them? Performance minus but usability plus?
+"""
+F_double_fov encompasses all non-Cartesian dimensions
+write into y
+PlasticArrays:
+input cannot be x_padded
+y_padded cannot be y
+
+BE AWARE OF FFTSHIFT, use modeord=1 in F_double_fov (FINUFFT), TODO: implement that for the user?
+"""
+function plan_lowrank_toeplitz(
+	y::AbstractArray{T, N},
+	F_double_fov::LinearOperator{T},
+	lr_mix::AbstractArray{<: Number, M};
+	x_padded::AbstractArray{<: T, N}=empty(Array{T, N}),
+	y_padded::AbstractArray{<: T, N}=empty(Array{T, N}),
+	kwargs...
+) where {T <: Complex, N, M}
 	@assert N > 2
-	num_other, num_σ = size(y)[N-1:N]
 	shape = size(y)[1:N-2]
+	num_other, num_σ = size(y)[N-1:N]
+	lr_mix = reshape(lr_mix, prod(size(lr_mix)[1:M-2]), size(lr_mix, M-1), size(lr_mix, M))
 	@assert num_σ == size(lr_mix, 2) == size(lr_mix, 3)
-	x_padded, y_padded, Fm_d, F, FH_unnormalised = prepare_lowrank_toeplitz_embedding(
+	Fm_d, F, FH_unnormalised, x_padded, y_padded = prepare_lowrank_toeplitz(
+		shape,
+		num_other,
+		num_σ,
 		F_double_fov,
 		lr_mix,
-		shape, num_other
+		x_padded, y_padded
 	)
 	# Define convolution operator
 	FHMF = HermitianOperator{T}(
 		length(y),
 		(y, x) -> begin
 			(ys, xs) = reshape.((y, x), shape..., num_other, num_σ)
-			apply_lowrank_toeplitz_embedding!(ys, xs, x_padded, y_padded, Fm_d, F, FH_unnormalised)
+			apply_lowrank_toeplitz!(ys, xs, x_padded, y_padded, Fm_d, F, FH_unnormalised)
 			y
 		end;
 		out=vec(y)
@@ -403,14 +516,28 @@ end
 
 """
 In place, be careful with conjugate gradient
+input cannot be x_padded
+output cannot be y_padded
 """
-function plan_lowrank_toeplitz_embedding!(shape::NTuple{D, Integer}, num_other::Integer, F_double_fov::LinearOperator{T}, lr_mix::AbstractArray{<: Number, 3}; kwargs...) where {T <: Number, D}
+function plan_lowrank_toeplitz!(
+	shape::NTuple{D, Integer},
+	num_other::Integer,
+	F_double_fov::LinearOperator{T},
+	lr_mix::AbstractArray{<: Number, M};
+	x_padded::AbstractArray{<: T, N}=empty(Array{T, N}),
+	y_padded::AbstractArray{<: T, N}=empty(Array{T, N}),
+	kwargs...
+) where {T <: Number, D, N, M}
+	lr_mix = reshape(lr_mix, prod(size(lr_mix)[1:M-2]), size(lr_mix, M-1), size(lr_mix, M))
 	num_σ = size(lr_mix, 2)
 	@assert num_σ == size(lr_mix, 3)
-	x_padded, y_padded, Fm_d, F, FH_unnormalised = prepare_lowrank_toeplitz_embedding(
+	Fm_d, F, FH_unnormalised, x_padded, y_padded = prepare_lowrank_toeplitz(
+		shape,
+		num_other,
+		num_σ,
 		F_double_fov,
 		lr_mix,
-		shape, num_other
+		x_padded, y_padded
 	)
 	# Define convolution operator
 	FHMF = HermitianOperator{T}(
@@ -418,7 +545,7 @@ function plan_lowrank_toeplitz_embedding!(shape::NTuple{D, Integer}, num_other::
 		(y, x) -> begin
 			@assert length(y) == 0
 			z = reshape(x, shape..., num_other, num_σ)
-			apply_lowrank_toeplitz_embedding!(z, z, x_padded, y_padded, Fm_d, F, FH_unnormalised)
+			apply_lowrank_toeplitz!(z, z, x_padded, y_padded, Fm_d, F, FH_unnormalised)
 			x
 		end
 	)
@@ -435,7 +562,7 @@ x[spatial dimensions ..., singular components]
 DT_renorm[σ, fingerprints] must be normalised in the SVD domain after cut-off
 
 """
-function projection_matrix(
+function plan_dictionary_projection!(
 	DT_renorm::AbstractMatrix{<: Real},
 	matches::AbstractVector{<: Integer},
 	num_x::Integer,
@@ -453,6 +580,7 @@ function projection_matrix(
 			x = reshape(x, num_x, num_σ) # Weird: this has to be done before complexifying, otherwise the same error as in overlap!() with views
 			xd = decomplexify(x) # d for decomplexified
 			xpd = similar(xd)
+			# TODO: this must be reordered!
 			for xi in eachindex(matches)
 				@inbounds match = matches[xi]
 				p_real = 0.0
@@ -526,7 +654,7 @@ function admm(
 	P::HermitianOperator{T},
 	ρ::Real, # Weighting of dictionary regularisation term, in theory the weighting is ρ/2, but here just ρ is used!
 	matches::AbstractVector{<: Integer}, # is modified
-	match::FunctionWrapper{Tuple{Vector{Int64}, Vector{Float64}}, Tuple{Vector{T}}}, # Must support match(x) and match(x,y)
+	match::Function, # Must support match(x) and match(x,y)
 	maxiter::Integer, # 48
 	cg_maxiter # 64
 ) where T <: Complex

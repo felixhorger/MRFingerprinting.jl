@@ -5,10 +5,12 @@ module MRFingerprinting
 	using LinearOperators
 	using LoopVectorization
 	using LoopVectorizationTools
+	import ThreadTools
 	using FFTW
 	FFTW.set_num_threads(Threads.nthreads())
 	import FunctionWrappers: FunctionWrapper
 	import MRIRecon
+	import MRIRecon: check_allocate, empty
 	using Statistics
 	import Optim
 	import BlackBoxOptim
