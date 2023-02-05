@@ -1,8 +1,8 @@
-
 using Revise
 using BenchmarkTools
 using FFTW
 using Cthulhu
+using PlasticArrays
 import MRIRecon
 import MRFingerprinting as MRF
 import MRITrajectories
@@ -28,37 +28,76 @@ VH[5, 153:154] .= n4
 VH[5, 155:156] .= -n4
 VH * VH'
 
-# Low-rank mixing compared to conventional L' * M * L'
-# Choose small matrix size so that the time vector fits into memory
-num_columns = 16
-num_lines = 16
-shape = (num_columns, num_lines)
-num_angles = MRITrajectories.required_num_spokes(num_lines)
-#
-spokes_per_timepoint = 2
-total_num_spokes = spokes_per_timepoint * num_time
-φ, spoke_indices = MRITrajectories.golden_angle_incremented(total_num_spokes, num_angles)
-φ, spoke_indices = MRITrajectories.sort_angles!(φ, spoke_indices, spokes_per_timepoint, num_time)
-spoke_indices = CartesianIndex.(MRITrajectories.chronological_order(spoke_indices))
-lr_mix = MRF.lowrank_mixing(VH, spoke_indices, (num_angles,))
-num_channels = 10
-#
-# Low-rank mixing
-ym = Array{ComplexF64, 4}(undef, num_columns, num_angles, num_channels, num_σ);
-y = rand(ComplexF64, num_columns, num_angles, num_channels, num_σ);
-y_vec = vec(y)
-lr_mix_d = MRF.decomplexify(lr_mix)
-lr_mix_d_c = MRF.decomplexify(convert.(ComplexF64, lr_mix))
-#
-MRF.apply_lowrank_mixing!(ym, y, lr_mix_d, num_columns, num_channels)
-MRF.apply_lowrank_mixing!(ym, y, lr_mix_d_c, num_columns, num_channels)
-# Non-optimised method
-L = MRF.plan_lr2time(transpose(VH), conj.(VH), num_columns * num_angles * num_channels)
-M = MRIRecon.plan_masking(spoke_indices, (num_columns, num_angles, num_channels, num_time))
-#
-ym2 = L' * M * L * y_vec
-# Check equality
-@assert ym2 ≈ vec(ym)
+let
+	# Low-rank mixing compared to conventional L' * M * L'
+	# Choose small matrix size so that the time vector fits into memory
+	num_columns = 16
+	num_lines = 16
+	shape = (num_columns, num_lines)
+	num_angles = MRITrajectories.required_num_spokes(num_lines)
+	#
+	spokes_per_timepoint = 2
+	total_num_spokes = spokes_per_timepoint * num_time
+	φ, spoke_indices = MRITrajectories.golden_angle_incremented(total_num_spokes, num_angles)
+	φ, spoke_indices = MRITrajectories.sort_angles!(φ, spoke_indices, spokes_per_timepoint, num_time)
+	spoke_indices = CartesianIndex.(MRITrajectories.chronological_order(spoke_indices))
+	lr_mix = MRF.lowrank_mixing(VH, spoke_indices, (num_angles,))
+	num_channels = 10
+	#
+	# Low-rank mixing
+	ym = Array{ComplexF64, 4}(undef, num_columns, num_angles, num_channels, num_σ);
+	y = rand(ComplexF64, num_columns, num_angles, num_channels, num_σ);
+	y_vec = vec(y)
+	lr_mix_d = MRF.decomplexify(lr_mix)
+	lr_mix_d_c = MRF.decomplexify(convert.(ComplexF64, lr_mix))
+	#
+	MRF.apply_lowrank_mixing!(ym, y, lr_mix_d, num_columns, num_channels)
+	MRF.apply_lowrank_mixing!(ym, y, lr_mix_d_c, num_columns, num_channels)
+	# Non-optimised method
+	L = MRF.plan_lr2time(transpose(VH), conj.(VH), num_columns * num_angles * num_channels)
+	M = MRIRecon.plan_masking!(spoke_indices, (num_columns, num_angles, num_channels, num_time))
+	#
+	ym2 = L' * M * L * y_vec
+	# Check equality
+	@assert ym2 ≈ vec(ym)
+end
+GC.gc(true)
+
+
+# Low-rank sparse to dense
+num_time = 41
+VH = rand(6, num_time)
+V_conj = conj.(VH')
+shape = (128, 128)
+#128 * 4 * prod(shape) * num_time * 16 * 1e-9
+N = 70000
+sampling = MRITrajectories.uniform_dynamic(shape, num_time, 10000)[1:N]
+x = rand(128, 4, N)
+dense_kt = MRIRecon.sparse2dense(x, sampling, shape, num_time);
+dense_kσ = MRF.time2lr(dense_kt, V_conj);
+direct_dense_kσ = MRF.lowrank_sparse2dense(x, sampling, shape, V_conj);
+parallel_dense_kσ = MRF.lowrank_sparse2dense_parallel(x, sampling, shape, V_conj);
+@assert isapprox(direct_dense_kσ, dense_kσ; atol=1e-12)
+@assert isapprox(direct_dense_kσ, parallel_dense_kσ; atol=1e-16)
+#imshow(abs.(dense_kσ[1, 1, :, :, :]))
+#imshow(abs.(direct_dense_kσ[1, 1, :, :, :]))
+
+# Performance
+num_time = 313
+VH = rand(6, num_time)
+V_conj = conj.(VH')
+shape = (256, 256)
+sampling = MRITrajectories.uniform((shape..., num_time))
+N = 70000
+sampling = [CartesianIndex(s[1], s[2]) for s in sampling[1:N]]
+x = zeros(ComplexF64, 256, 20, N) # readout, channel, k(sparse)-t
+
+@time direct_dense_kσ = MRF.lowrank_sparse2dense(x, sampling, shape, V_conj);
+
+@time parallel_dense_kσ = MRF.lowrank_sparse2dense_parallel(x, sampling, shape, V_conj);
+
+#@code_warntype MRF.lowrank_sparse2dense_parallel(x, sampling, shape, V_conj);
+
 
 
 # Low-rank Toeplitz Embedding
@@ -76,7 +115,7 @@ total_num_spokes = spokes_per_timepoint * num_time
 spoke_indices = CartesianIndex.(MRITrajectories.chronological_order(spoke_indices))
 lr_mix = MRF.lowrank_mixing(VH, spoke_indices, (num_angles,))
 num_channels = 1 * 192
-#
+
 F_double_fov = MRIRecon.plan_fourier_transform(k[1, :], k[2, :], (2num_columns, 2num_lines, 1); modeord=1)
 F = MRIRecon.plan_fourier_transform(k[1, :], k[2, :], (num_columns, num_lines, num_channels * num_σ))
 M = MRF.plan_lowrank_mixing(lr_mix, num_columns, num_channels)
@@ -89,11 +128,11 @@ y = zeros(ComplexF64, num_columns, num_lines, num_channels, num_σ);
 vec_y = vec(y)
 GC.gc(true)
 
-T = MRF.plan_lowrank_toeplitz_embedding(y, F_double_fov, lr_mix)
+T = MRF.plan_lowrank_toeplitz(y, F_double_fov, lr_mix)
 GC.gc(true)
 
 @benchmark reshape($T * $vec_x, $num_columns, $num_lines, $num_channels, $num_σ) samples=1 seconds=40 evals=1
-@benchmark reshape($A * $vec_x, $num_columns, $num_lines, $num_channels, $num_σ) samples=4 seconds=40
+@benchmark reshape($A * $vec_x, $num_columns, $num_lines, $num_channels, $num_σ) samples=4 seconds=40 evals=1
 
 @time z1 = reshape(T * vec_x, num_columns, num_lines, num_channels, num_σ);
 @time z2 = reshape(A * vec_x, num_columns, num_lines, num_channels, num_σ);
@@ -120,16 +159,59 @@ fig, axs = plt.subplots(3, 5, sharex=true, sharey=true)
 end
 
 
-x_padded, vec_x_padded, F, FH_unnormalised, M, centre_indices = MRF.prepare_lowrank_toeplitz_embedding(F_double_fov, lr_mix, shape, num_channels)
+# Plastic arrays
+sp = MRF.lowrank_toeplitz_padded_size((num_columns, num_lines), num_channels, num_σ)
+ap_in = PlasticArray(prod(sp) * sizeof(ComplexF64))
+ap_out = PlasticArray(prod(sp) * sizeof(ComplexF64))
+GC.gc(true)
 
-MRF.apply_lowrank_toeplitz_embedding(
-	vec_x,
-	x_padded,
-	vec_x_padded,
-	vec_y,
-	F,
-	FH_unnormalised,
-	M,
-	centre_indices
-) 
+Tp = MRF.plan_lowrank_toeplitz!(
+	(num_columns, num_lines), num_channels,
+	F_double_fov,
+	lr_mix;
+	x_padded=mould(ap_out, ComplexF64, sp), # input to operator is ap_in
+	y_padded=mould(ap_in, ComplexF64, sp),
+)
+z3 = reshape(Tp * copy(vec_x), num_columns, num_lines, num_channels, num_σ);
+@assert z3 ≈ z1
+
+Fsp = MRIRecon.fourier_transform_size(k[1, :], k[2, :], (num_columns, num_lines, num_channels * num_σ))
+# (out) Fp' (in) * Mp (out) * Fp
+Fp = MRIRecon.plan_fourier_transform(
+	k[1, :], k[2, :],
+	(num_columns, num_lines, num_channels * num_σ);
+	Fx=mould(ap_out, ComplexF64, sp[1]),
+	FHy=mould(ap_in, ComplexF64, sp[2])
+)
+GC.gc(true)
+Msp = MRF.lowrank_mixing_dim(num_columns, num_angles, num_channels, num_σ)
+Mp = MRF.plan_lowrank_mixing(
+	lr_mix,
+	num_columns, num_channels;
+	Mx=mould(ap_in, ComplexF64, Msp)
+)
+GC.gc(true)
+
+Ap = Fp' * Mp * Fp
+
+@time z4 = reshape(Ap * vec_x, num_columns, num_lines, num_channels, num_σ);
+@assert z4 ≈ z2
+
+
+
+#= OLD
+
+let v = vec(ones(ComplexF64, (1, num_lines, num_partitions, num_channels, num_σ)))
+	a = reshape(M * v, num_lines, num_partitions, num_channels, num_σ)
+	b = reshape(Λ' * DHD * Λ * v, num_lines, num_partitions, num_channels, num_σ)
+	#plt.figure()
+	#plt.imshow(abs.(a[:, :, 1, 1]))
+	#plt.figure()
+	#plt.imshow(abs.(b[:, :, 1, 1]))
+	#plt.show()
+	#println(a[1:10], b[1:10])
+	@assert a ≈ b
+end
+
+=#
 
