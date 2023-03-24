@@ -2,10 +2,12 @@
 """
 	closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
 
-Find indices of values in `target` which are closest to arbitrarily valued parameters `params`.
+Find indices of values in `target` (sorted) which are closest to arbitrarily valued parameters `params`.
+Parameters can be Number or NTuple{N, Number}, where the first index in the tuple must have the highest weight
+in sorting.
 
 """
-function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
+function closest(params::AbstractVector, target::AbstractVector)
 	c = Vector{Int64}(undef, length(params))
 	Threads.@threads for i in eachindex(params)
 		p = params[i]
@@ -13,13 +15,26 @@ function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Nu
 		for outer j in eachindex(target)
 			target[j] > p && break
 		end
-		if j > 1 && abs(target[j] - p) > abs(target[j-1] - p)
+		if j > 1 && sum(abs2.(target[j] .- p)) > sum(abs2.(target[j-1] .- p))
 			c[i] = j-1
 		else
 			c[i] = j
 		end
 	end
 	return c
+end
+
+function closest(params::NTuple{N, AbstractVector}, target::NTuple{N, AbstractVector}) where N
+	num = length(params[1])
+	@assert all(num .== length.(params))
+	c = Matrix{Int64}(undef, num, N)
+	for i = 1:N
+		@views c[:, i] .= closest(params[i], target[i])
+	end
+	s = Vector{Int}(undef, N)
+	s[1] = 1
+	s[2:N] .= cumprod(length.(target[1:N-1]))
+	return dropdims(sum(s .* (c .- 1)'; dims=1) .+ 1; dims=1)
 end
 
 
