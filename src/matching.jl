@@ -3,23 +3,45 @@
 	closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
 
 Find indices of values in `target` (sorted) which are closest to arbitrarily valued parameters `params`.
-Parameters can be Number or NTuple{N, Number}, where the first index in the tuple must have the highest weight
-in sorting.
-
 """
-function closest(params::AbstractVector, target::AbstractVector)
+function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
 	c = Vector{Int64}(undef, length(params))
 	Threads.@threads for i in eachindex(params)
 		p = params[i]
 		local j
 		for outer j in eachindex(target)
-			target[j] > p && break
+			target[j] ≥ p && break
 		end
-		if j > 1 && sum(abs2.(target[j] .- p)) > sum(abs2.(target[j-1] .- p))
+		if j > 1 && abs2(target[j] - p) > abs2(target[j-1] - p)
 			c[i] = j-1
 		else
 			c[i] = j
 		end
+	end
+	return c
+end
+
+"""
+	closest(params::T, target::T) where {N, T <: AbstractVector{<: NTuple{N, <: Number}}}
+
+Find indices of values in `target` which are closest to arbitrarily valued parameters `params`.
+No sorting needed.
+"""
+function closest(params::AbstractVector{<: NTuple{N, <: Number}}, target::AbstractVector{<: NTuple{N, <: Number}}) where N
+	c = Vector{Int64}(undef, length(params))
+	Threads.@threads for i in eachindex(params)
+		p = params[i]
+		best = 1
+		best_diff = Inf
+		for j in eachindex(target)
+			diff = sum(abs2, target[j] .- p)
+			if diff < best_diff
+				best_diff = diff
+				best = j
+				best_diff == 0.0 && break
+			end
+		end
+		c[i] = best
 	end
 	return c
 end
