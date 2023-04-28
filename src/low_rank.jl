@@ -144,7 +144,7 @@ function lowrank_sparse2dense(
 	shape::NTuple{N, Integer},
 	V_conj::AbstractMatrix{<: Number}
 ) where {N, T <: Number}
-	error("Obsolete, use parallel version")
+	@warn "Obsolete, use parallel version"
 	@assert length(indices) == size(kspace, 3)
 	num_dynamic, num_σ = size(V_conj)
 	# Check k
@@ -403,6 +403,9 @@ function lowrank_toeplitz_padded_size(shape::NTuple{N, Integer}, num_other::Inte
 	return ((2 .* shape)..., num_other, num_σ)
 end
 
+"""
+Kernel includes fft normalisation prod(shape)
+"""
 function lowrank_toeplitz_kernel(
 	shape::NTuple{D, Integer},
 	F_double_fov::LinearOperator{T},
