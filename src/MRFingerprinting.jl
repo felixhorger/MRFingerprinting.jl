@@ -20,6 +20,7 @@ module MRFingerprinting
 	include("dictionary.jl")
 	include("matching.jl")
 	include("low_rank.jl")
+	include("sampling.jl")
 
 end
 
