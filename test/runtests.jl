@@ -9,6 +9,12 @@ import MRITrajectories
 import PyPlot as plt
 import PyPlotTools
 
+
+# Testing closest()
+MRF.closest([2.0, 3.4], [2, 3, 4, 5]) # (2, 3), (3, 2)
+MRF.closest([(2.0, 2.0), (2.0, 3.5)], [(2.0, 2.0), (2., 4.), (3., 2.)]) # (2, 3), (3, 2)
+
+
 # Haar wavelets
 num_σ = 5
 num_time = 313
@@ -91,12 +97,33 @@ sampling = MRITrajectories.uniform((shape..., num_time))
 N = 70000
 sampling = [CartesianIndex(s[1], s[2]) for s in sampling[1:N]]
 x = zeros(ComplexF64, 256, 20, N) # readout, channel, k(sparse)-t
+dense_kt = MRF.time2lr(dense_kt, V_conj);
+dense_kt = MRIRecon.sparse2dense(x, sampling, shape, num_time);
 
 @time direct_dense_kσ = MRF.lowrank_sparse2dense(x, sampling, shape, V_conj);
 
 @time parallel_dense_kσ = MRF.lowrank_sparse2dense_parallel(x, sampling, shape, V_conj);
 
 #@code_warntype MRF.lowrank_sparse2dense_parallel(x, sampling, shape, V_conj);
+
+# sparse kt to lowrank operator test
+num_time = 13
+VH = rand(6, num_time)
+V_conj = conj.(VH')
+shape = (128, 128)
+sampling = repeat(collect(vec(CartesianIndices(shape))), inner=num_time)
+x = rand(ComplexF64, 1, shape..., 1, 6)
+xt = MRF.lr2time(x, VH)
+y = MRF.time2lr(xt, V_conj)
+
+UL = MRF.plan_lowrank2sparse(V_conj, VH, sampling, 1, shape, 1)
+
+z = permutedims(reshape(UL * vec(x), 1, num_time, shape..., 1), (1, 3, 4, 5, 2))
+@assert maximum(abs, z .- xt) < 1e-10
+
+y_ = reshape(UL' * (UL * vec(x)), size(y))
+@assert maximum(abs, y_ .- y) < 1e-10
+
 
 
 
@@ -196,7 +223,6 @@ Ap = Fp' * Mp * Fp
 
 @time z4 = reshape(Ap * vec_x, num_columns, num_lines, num_channels, num_σ);
 @assert z4 ≈ z2
-
 
 
 #= OLD

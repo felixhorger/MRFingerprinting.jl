@@ -2,6 +2,14 @@
 # Definitions: Use flat spatial dimensions, i.e. vector is a matrix with one spatial and one temporal dimension.
 # For all the CG stuff however, this needs to be reshaped into a single vector
 
+function lr2time(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) where N
+	shape = size(x)
+	x = reshape(x, :, shape[N])
+	xt = x * VT
+	xt = reshape(xt, shape[1:N-1]..., size(VT, 2))
+	return xt
+end
+
 """
 	Useful for compression of actual kspace data for creating spatial ft without having to do the reshaping every time
 	Of course works for any time domain array
@@ -49,9 +57,7 @@ end
 
 lowrank2time_size(num_time::Integer, num_σ::Integer, num_other::Integer) = (num_other * num_time, num_other * num_σ)
 
-"""
-	num_other is everything except from dynamic
-"""
+# num_other is everything except from dynamic
 function plan_lowrank2time(
 	V_conj::AbstractMatrix{<: Number},
 	VT::AbstractMatrix{<: Number},
@@ -60,6 +66,7 @@ function plan_lowrank2time(
 	Lx::AbstractVector{<: T}=empty(Vector{dtype}),
 	LHy::AbstractVector{<: T}=empty(Vector{dtype})
 ) where T <: Number
+	# TODO remove duplicate VT and V_conj?
 	# TODO: This could be done with @turbo, but this should be fast enough
 	num_time, num_σ = size(V_conj)
 	@assert size(VT) == (num_σ, num_time)
@@ -174,6 +181,92 @@ function lowrank_sparse2dense(
 	return backprojection
 end
 
+
+# Operator to do the same but with different axes permutation
+function plan_lowrank2sparse(
+	V_conj::AbstractMatrix{<: Number},
+	VT::AbstractMatrix{<: Number},
+	indices::AbstractVector{<: CartesianIndex{N}},
+	num_readout::Integer,
+	shape::NTuple{N, Integer},
+	num_channels::Integer;
+	dtype::Type{T}=ComplexF64,
+	ULx::AbstractVector{<: T}=empty(Vector{dtype}),
+	LH_UH_y::AbstractVector{<: T}=empty(Vector{dtype})
+) where {T <: Number, N}
+	num_dynamic, num_σ = size(V_conj)
+	@assert size(VT) == (num_σ, num_dynamic)
+
+	# Check k
+	for k in indices
+		if one(CartesianIndex{N}) > k > CartesianIndex(shape)
+			error("Sampling index is not within given shape")
+			return Array{T, N+3}(undef, (0 for _ = 1:N+3)...) # for type stability, other solution?
+		end
+	end
+
+	# Extend by readout index
+	extended_indices = [CartesianIndex{N+1}(Tuple(I)..., i) for (i, I) in enumerate(indices)]
+
+	# Split indices thread-safely for L^H U^H
+	num_threads = Threads.nthreads()
+	split_indices = ThreadTools.safe_split_threads(
+		extended_indices,
+		(1, 2),
+		num_threads
+	)
+
+	num_i = length(indices)
+	length_in = num_readout * prod(shape) * num_channels * num_σ
+	length_out = num_readout * num_i * num_channels
+
+	UL = LinearOperator{T}(
+		(length_out, length_in),
+		(sparse_kt_space_vec, lowrank_kspace_vec) -> begin
+			turbo_wipe!(sparse_kt_space_vec)
+			sparse_kt_space = reshape(sparse_kt_space_vec, num_readout, num_i, num_channels)
+			lowrank_kspace = reshape(lowrank_kspace_vec, num_readout, shape..., num_channels, num_σ)
+			for tid = 1:num_threads
+				let split_indices = split_indices[tid]
+					for σ = 1:num_σ, c = 1:num_channels
+						for K in split_indices
+							k = CartesianIndex(Tuple(K)[1:N])
+							i = K[N+1]
+							dynamic = mod1(i, num_dynamic)
+							for r = 1:num_readout
+								sparse_kt_space[r, i, c] += lowrank_kspace[r, k, c, σ] * VT[σ, dynamic]
+							end
+						end
+					end
+				end
+			end
+			sparse_kt_space_vec
+		end;
+		adj = (lowrank_kspace_vec, sparse_kt_space_vec) -> begin
+			turbo_wipe!(lowrank_kspace_vec)
+			sparse_kt_space = reshape(sparse_kt_space_vec, num_readout, num_i, num_channels)
+			lowrank_kspace = reshape(lowrank_kspace_vec, num_readout, shape..., num_channels, num_σ)
+			Threads.@threads for t = 1:num_threads
+				let split_indices = split_indices[t]
+					for σ = 1:num_σ
+						for K in split_indices
+							k = CartesianIndex(Tuple(K)[1:N])
+							i = K[N+1]
+							dynamic = mod1(i, num_dynamic)
+							for c = 1:num_channels, r = 1:num_readout
+								lowrank_kspace[r, k, c, σ] += sparse_kt_space[r, i, c] * V_conj[dynamic, σ]
+							end
+						end
+					end
+				end
+			end
+			lowrank_kspace_vec
+		end,
+		out=check_allocate(ULx, length_out),
+		out_adj_inv=check_allocate(LH_UH_y, length_in)
+	)
+	return UL
+end
 
 
 """
