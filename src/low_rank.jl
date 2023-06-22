@@ -183,6 +183,8 @@ end
 
 
 # Operator to do the same but with different axes permutation
+# TODO:rename sparse_kt
+# TODO: size check ok?
 function plan_lowrank2sparse(
 	V_conj::AbstractMatrix{<: Number},
 	VT::AbstractMatrix{<: Number},
@@ -226,8 +228,8 @@ function plan_lowrank2sparse(
 			turbo_wipe!(sparse_kt_space_vec)
 			sparse_kt_space = reshape(sparse_kt_space_vec, num_readout, num_i, num_channels)
 			lowrank_kspace = reshape(lowrank_kspace_vec, num_readout, shape..., num_channels, num_σ)
-			for tid = 1:num_threads
-				let split_indices = split_indices[tid]
+			Threads.@threads for tid = 1:num_threads
+				@inbounds let split_indices = split_indices[tid]
 					for σ = 1:num_σ, c = 1:num_channels
 						for K in split_indices
 							k = CartesianIndex(Tuple(K)[1:N])
@@ -247,7 +249,7 @@ function plan_lowrank2sparse(
 			sparse_kt_space = reshape(sparse_kt_space_vec, num_readout, num_i, num_channels)
 			lowrank_kspace = reshape(lowrank_kspace_vec, num_readout, shape..., num_channels, num_σ)
 			Threads.@threads for t = 1:num_threads
-				let split_indices = split_indices[t]
+				@inbounds let split_indices = split_indices[t]
 					for σ = 1:num_σ
 						for K in split_indices
 							k = CartesianIndex(Tuple(K)[1:N])
@@ -283,7 +285,7 @@ function lowrank_mixing(
 	VH::AbstractMatrix{<: T},
 	indices::AbstractVector{<: CartesianIndex{N}},
 	shape::NTuple{N, Integer}
-) where {N, T}
+) where {N, T <: Number}
 	num_σ, num_dynamic = size(VH)
 	linear_indices = LinearIndices(shape)
 	perm = sortperm(indices; by=(x::CartesianIndex{N} -> linear_indices[x]))
@@ -304,6 +306,17 @@ function lowrank_mixing(
 		@views lr_mix[:, :, k] .+= VH_outer_V[:, :, dynamic]
 	end
 	return permutedims(lr_mix, ((3:N+2)..., 1, 2))
+end
+function lowrank_mixing(
+	VH::AbstractMatrix{<: T},
+	indices::AbstractVector{<: Integer}
+) where T <: Number
+	num_σ, num_dynamic = size(VH)
+	lr_mix = zeros(T, num_σ, num_σ)
+	for t in indices, σ2 = 1:num_σ, σ1 = 1:num_σ
+		lr_mix[σ1, σ2] += VH[σ1, t] * conj(VH[σ2, t])
+	end
+	return lr_mix
 end
 
 """

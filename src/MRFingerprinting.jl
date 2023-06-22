@@ -12,6 +12,7 @@ module MRFingerprinting
 	import MRIRecon
 	import MRIRecon: check_allocate, empty
 	using Statistics
+	using Random
 	import Optim
 	import BlackBoxOptim
 
