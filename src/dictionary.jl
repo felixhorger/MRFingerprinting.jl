@@ -1,4 +1,5 @@
 
+# TODO: where is bang?
 function normalise(D::AbstractMatrix{<: Number})::Tuple{AbstractMatrix{<: Number}, Vector{Float64}}
 	# Axes: D[fingerprint, time]
 	norms = sqrt.(dropdims(sum(abs2, D; dims=2); dims=2))

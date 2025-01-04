@@ -1,4 +1,40 @@
 
+#=
+	If the schedule length and the shape of k-space are low integer multiples of each other,
+	effort for optimising the sampling can be reduced by going block by block in k-space.
+	This function extends the sampling optimised on a block onto the whole k-space
+=#
+function extend_sampling(
+	optimised_sampling::AbstractVector{<: CartesianIndex{2}},
+	num_σ::Integer,
+	shape::NTuple{N, Integer},
+	tiles::NTuple{N, Integer}
+) where N
+	num_time = length(optimised_sampling)
+	num_patterns = num_time ÷ num_σ
+	sampling_patterns = vec(MRIRecon.split_sampling_spatially(optimised_sampling, (num_patterns, 1), num_time))
+	tile_size = shape .÷ tiles
+	tile_length = prod(tile_size)
+	@assert tile_length == length(sampling_patterns)
+	tile_sampling_length = num_time
+
+	sampling = Vector{CartesianIndex{2}}(undef, num_σ * prod(shape))
+	sampling_tile = Array{Vector{Int}, 2}(undef, tile_size)
+	inside_tile_indices = collect(CartesianIndices(tile_size))
+	i = 1
+	for I in CartesianIndices(tiles)
+		I = CartesianIndex((Tuple(I) .- 1) .* tile_size)
+		for (j, J) = enumerate(shuffle!(inside_tile_indices))
+			sampling_tile[J] = sampling_patterns[j]
+		end
+		sampling[i:i+tile_sampling_length-1] = [I + J for J in MRIRecon.in_chronological_order(sampling_tile, num_time)]
+		i += tile_sampling_length
+	end
+	return sampling
+end
+
+
+
 function best_temporal_sampling(t0::Integer, num_samples::Integer, VH::AbstractMatrix{<: T}) where T <: Number
 	num_σ, num_dynamic = size(VH)
 	B = Matrix{real(T)}(undef, num_σ, num_samples)
@@ -115,6 +151,7 @@ function improve_sampling!(
 	end
 	return split_sampling, replaced
 end
+
 #function improve_sampling_parallel(
 #	VH::AbstractMatrix{<: T},
 #	split_sampling::AbstractVector{<: AbstractVector{<: CartesianIndex{N}}},
@@ -184,20 +221,45 @@ function improve_sampling_2!(
 	return MRIRecon.split_sampling(sampling, num_dynamic), replaced
 end
 
+# singular values
 function compute_eigenvalues(
 	VH::AbstractMatrix{<: T},
-	shape::NTuple{N, Integer},
+	shape::NTuple{N, Integer}, # TODO: wth is this here, since shape == size(sampling)?
 	sampling::AbstractArray{<: AbstractVector{<: Integer}, N}
 ) where {N, T <: Number}
+	# TODO: limitation is that number of samples must be the same for every k
 	# Compute eigenvalues
 	num_σ, num_dynamic = size(VH)
 	λ = Array{real(T), N+1}(undef, shape..., num_σ)
+	lr_mix = Matrix{T}(undef, num_σ, maximum(length, sampling)) # This is not really lr_mix, just L or L^H, rename
 	for I in CartesianIndices(shape)
-		lr_mix = lowrank_mixing(VH, sampling[I])
-		@views λ[I, :] = abs.(eigvals!(Hermitian(lr_mix)))
+		if length(sampling) == 0
+			λ[I, :] .= 0
+		end
+		for (i, t) in enumerate(sampling[I])
+			@views lr_mix[:, i] = VH[:, t]
+		end
+		j = length(sampling[I])
+		@views λ[I, 1:min(j, num_σ)] = svd!(qr(lr_mix[:, 1:j], LinearAlgebra.ColumnNorm()).R; alg=LinearAlgebra.QRIteration()).S
+		@views λ[I, j+1:num_σ] .= 0
 	end
 	return λ
 end
+# Actual eigenvalues
+#function compute_eigenvalues(
+#	VH::AbstractMatrix{<: T},
+#	shape::NTuple{N, Integer},
+#	sampling::AbstractArray{<: AbstractVector{<: Integer}, N}
+#) where {N, T <: Number}
+#	# Compute eigenvalues
+#	num_σ, num_dynamic = size(VH)
+#	λ = Array{real(T), N+1}(undef, shape..., num_σ)
+#	for I in CartesianIndices(shape)
+#		lr_mix = lowrank_mixing(VH, sampling[I])
+#		@views λ[I, :] = abs.(eigvals!(Hermitian(lr_mix)))
+#	end
+#	return λ
+#end
 
 function calculate_conditioning_parallel(λ::AbstractArray{<: Number, N}) where N
 	shape = size(λ)[1:N-1]
@@ -210,10 +272,10 @@ function calculate_conditioning_parallel(λ::AbstractArray{<: Number, N}) where 
 	thread_maxi = fill(maxi, Threads.nthreads())
 	thread_i_mini = fill(i_mini, Threads.nthreads())
 	thread_i_maxi = fill(i_maxi, Threads.nthreads())
-	@inbounds Threads.@threads for I in CartesianIndices(shape)
+	@inbounds Threads.@threads :static for I in CartesianIndices(shape)
 		tid = Threads.threadid()
-		λ_min = λ[I, 1]
-		λ_max = λ[I, num_σ]
+		λ_min = λ[I, num_σ]
+		λ_max = λ[I, 1]
 		if thread_mini[tid] > λ_min
 			thread_i_mini[tid] = I
 			thread_mini[tid] = λ_min
@@ -230,6 +292,7 @@ function calculate_conditioning_parallel(λ::AbstractArray{<: Number, N}) where 
 	return conditioning, i_mini, i_maxi, mini, maxi
 end
 
+# eigenvalues must be sorted!
 function calculate_conditioning(λ::AbstractArray{<: Number, N}) where N
 	shape = size(λ)[1:N-1]
 	num_σ = size(λ, N)
@@ -238,8 +301,8 @@ function calculate_conditioning(λ::AbstractArray{<: Number, N}) where N
 	maxi = mini
 	i_maxi = one(CartesianIndex{N-1})
 	@inbounds for I in CartesianIndices(shape)
-		λ_min = λ[I, 1]
-		λ_max = λ[I, num_σ]
+		λ_min = λ[I, num_σ] # TODO: adpated to SVD
+		λ_max = λ[I, 1]
 		if mini > λ_min
 			i_mini = I
 			mini = λ_min
@@ -260,7 +323,8 @@ function improve_sampling_3!(
 	split_sampling::AbstractVector{<: AbstractVector{<: CartesianIndex{N}}},
 	VH::AbstractMatrix{<: T},
 	shape::NTuple{N, Integer},
-	iter::Integer
+	iter::Integer;
+	maxiter::Integer=0 # zero means search all
 ) where {N, T <: Number}
 	num_σ, num_dynamic = size(VH)
 
@@ -270,6 +334,7 @@ function improve_sampling_3!(
 	# Compute initial eigenvalues and conditioning
 	λ = compute_eigenvalues(VH, shape, sampling)
 	conditioning, i_mini, i_maxi, λ_min, λ_max = calculate_conditioning(λ)
+	#@show "before", Threads.threadid(), conditioning
 
 	# Look-up for spatial indices
 	cartesian_indices = CartesianIndices(shape)
@@ -284,9 +349,16 @@ function improve_sampling_3!(
 	random_t1 = [Vector{Int}(undef, t) for t = 1:num_dynamic]
 	random_t2 = [Vector{Int}(undef, t) for t = 1:num_dynamic]
 
+	if maxiter == 0
+		maxiter = 2num_spatial
+	else
+		maxiter = min(maxiter, 2num_spatial)
+	end
+
+	lr_mix = Matrix{T}(undef, num_σ, length(sampling[1]))
 
 	# Iterate
-	i = 0 # iteration index
+	i = 0
 	@inbounds while i < iter
 		#mod(i, 1000) == 0 && @show i, conditioning
 		#λ = compute_eigenvalues(VH, shape, sampling)
@@ -294,7 +366,8 @@ function improve_sampling_3!(
 
 		#randperm!(random_two)
 		found = false
-		for m in randperm!(linear_indices)
+		for (progress, m) in @views enumerate(randperm!(linear_indices)[1:maxiter])
+			#mod(progress, 1000) == 0 && @show round(progress / maxiter, digits=2)
 			# Get random indices
 			j = mod1(m, 2) # random_two[I[1]]
 			k = (m-1) ÷ 2 + 1 # CartesianIndex(Tuple(I)[2])
@@ -314,11 +387,19 @@ function improve_sampling_3!(
 					times1[t1], times2[t2] = times2[t2], times1[t1]
 
 					# Find minimum and maximum eigenvalue
-					λ_new_1 = abs.(eigvals!(Hermitian(lowrank_mixing(VH, times1))))
-					λ_new_2 = abs.(eigvals!(Hermitian(lowrank_mixing(VH, times2))))
+					#λ_new_1 = abs.(eigvals!(Hermitian(lowrank_mixing(VH, times1))))
+					#λ_new_2 = abs.(eigvals!(Hermitian(lowrank_mixing(VH, times2))))
+					for (r, t) in enumerate(times1)
+						@views lr_mix[:, r] = VH[:, t]
+					end
+					λ_new_1 = svd!(qr(lr_mix, LinearAlgebra.ColumnNorm()).R; alg=LinearAlgebra.QRIteration()).S
+					for (r, t) in enumerate(times2)
+						@views lr_mix[:, r] = VH[:, t]
+					end
+					λ_new_2 = svd!(qr(lr_mix, LinearAlgebra.ColumnNorm()).R; alg=LinearAlgebra.QRIteration()).S
 
 					# Are new min/max eigenvalues smaller/greater than old ones?
-					if min(λ_new_1[1], λ_new_2[1]) ≤ λ_min && max(λ_new_1[end], λ_new_2[end]) ≥ λ_max
+					if min(λ_new_1[end], λ_new_2[end]) ≤ λ_min && max(λ_new_1[1], λ_new_2[1]) ≥ λ_max
 						# Swap back
 						times1[t1], times2[t2] = times2[t2], times1[t1]
 						continue
@@ -344,6 +425,7 @@ function improve_sampling_3!(
 					# If conditioning improved, keep swap, otherwise restore old values
 					if swapped_conditioning < conditioning
 						#@show i, swapped_conditioning, conditioning, λ_min, λ_max, i_mini, i_maxi, swapped_λ_mini, swapped_λ_maxi
+						#@show swapped_conditioning, conditioning
 						conditioning = swapped_conditioning                                        
 						i_mini = swapped_i_mini
 						i_maxi = swapped_i_maxi
@@ -384,6 +466,33 @@ function improve_sampling_3!(
 	#@assert swapped_i_maxi == i_maxi
 	#@assert swapped_λ_mini == λ_min
 	#@assert swapped_λ_maxi == λ_max
+
+	#λ = compute_eigenvalues(VH, shape, sampling)
+	#@show (
+	#	swapped_conditioning,
+	#	swapped_i_mini, swapped_i_maxi,
+	#	swapped_λ_mini, swapped_λ_maxi
+	#) = calculate_conditioning(λ)
+
+	#sampling2 = copy(sampling)
+	#sampling = MRIRecon.split_sampling_spatially(MRIRecon.in_chronological_order(MRIRecon.split_sampling(sampling, num_dynamic)), shape, num_dynamic)
+	#for I in CartesianIndices(shape)
+	#	@assert sort(sampling2[I]) == sort(sampling[I])
+	#end
+
+
+	#λ = compute_eigenvalues(VH, shape,
+	#MRIRecon.split_sampling_spatially(
+	#	MRIRecon.in_chronological_order(
+	#		MRIRecon.split_sampling(sampling, num_dynamic)), shape, num_dynamic))
+
+
+	#@show (
+	#	swapped_conditioning,
+	#	swapped_i_mini, swapped_i_maxi,
+	#	swapped_λ_mini, swapped_λ_maxi
+	#) = calculate_conditioning(λ)
+	#@show "after", Threads.threadid(), conditioning
 	return MRIRecon.split_sampling(sampling, num_dynamic), conditioning, i
 end
 

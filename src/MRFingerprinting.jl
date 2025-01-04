@@ -15,6 +15,7 @@ module MRFingerprinting
 	using Random
 	import Optim
 	import BlackBoxOptim
+	import IterativeSolvers: cg!
 
 	include("overlap.jl")
 	include("fit.jl")

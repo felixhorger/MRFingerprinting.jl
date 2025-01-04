@@ -2,6 +2,8 @@
 # Definitions: Use flat spatial dimensions, i.e. vector is a matrix with one spatial and one temporal dimension.
 # For all the CG stuff however, this needs to be reshaped into a single vector
 
+isorthonormal(VH) = isapprox(VH * VH', I(size(VH, 1)))
+
 function lr2time(x::AbstractArray{<: Number, N}, VT::AbstractMatrix{<: Number}) where N
 	shape = size(x)
 	x = reshape(x, :, shape[N])
@@ -107,12 +109,14 @@ function lowrank_sparse2dense_parallel(
 	shape::NTuple{N, Integer},
 	V_conj::AbstractMatrix{<: Number}
 ) where {N, T <: Number}
+	error("GC bug, use non-parallel version")
 	@assert length(indices) == size(kspace, 3)
 	num_dynamic, num_σ = size(V_conj)
 	# Check k
 	for k in indices
 		if one(CartesianIndex{N}) > k > CartesianIndex(shape)
 			error("Sampling index is not within given shape")
+			# TODO: what happens if just do nothing here, i.e. no return?
 			return Array{T, N+3}(undef, (0 for _ = 1:N+3)...) # for type stability, other solution?
 		end
 	end
@@ -151,7 +155,7 @@ function lowrank_sparse2dense(
 	shape::NTuple{N, Integer},
 	V_conj::AbstractMatrix{<: Number}
 ) where {N, T <: Number}
-	@warn "Obsolete, use parallel version"
+	@warn "Is GC bug solved (https://github.com/JuliaLang/julia/issues/52896)? If so, enable parallel version"
 	@assert length(indices) == size(kspace, 3)
 	num_dynamic, num_σ = size(V_conj)
 	# Check k
@@ -669,27 +673,29 @@ x[spatial dimensions ..., singular components]
 
 `matches` must be preallocated and filled to update P
 DT_renorm[σ, fingerprints] must be normalised in the SVD domain after cut-off
-
+TODO: num_x == num_f ?!
 """
-function plan_dictionary_projection!(
+function plan_dictionary_projection(
 	DT_renorm::AbstractMatrix{<: Real},
 	matches::AbstractVector{<: Integer},
 	num_x::Integer,
-	num_σ::Integer,
-	T::Type{C}
+	num_σ::Integer;
+	dtype::Type{C}=ComplexF64,
+	out::AbstractVector{<: C}=empty(Vector{dtype})
 ) where C <: Complex
 	@assert length(matches) == num_x
 	@assert size(DT_renorm, 1) == num_σ
 	num_D = size(DT_renorm, 2)
 
+	out = check_allocate(out, num_x * num_σ)
+
 	P = HermitianOperator{C}(
 		num_x * num_σ,
-		x -> begin
+		(y, x) -> begin
 			@assert all((i -> 0 <= i <= num_D), matches) # Zero is a forbidden index, in that case a zero filled vector will be returned
-			x = reshape(x, num_x, num_σ) # Weird: this has to be done before complexifying, otherwise the same error as in overlap!() with views
-			xd = decomplexify(x) # d for decomplexified
-			xpd = similar(xd)
-			# TODO: this must be reordered!
+			xs, ys = reshape.((x, y), num_x, num_σ) # Weird: this has to be done before complexifying, otherwise the same error as in overlap!() with views
+			(xd, yd) = decomplexify.((xs, ys)) # d for decomplexified
+			# TODO: is this single core? Could use threads here? Seems to make no difference
 			for xi in eachindex(matches)
 				@inbounds match = matches[xi]
 				p_real = 0.0
@@ -699,12 +705,13 @@ function plan_dictionary_projection!(
 					p_imag += DT_renorm[σ, match] * xd[2, xi, σ]
 				end
 				@turbo for σ = 1:num_σ
-					xpd[1, xi, σ] = p_real * DT_renorm[σ, match]
-					xpd[2, xi, σ] = p_imag * DT_renorm[σ, match]
+					yd[1, xi, σ] = p_real * DT_renorm[σ, match]
+					yd[2, xi, σ] = p_imag * DT_renorm[σ, match]
 				end
 			end
-			xp = reinterpret(C, xpd)
-		end
+			y
+		end;
+		out
 	)
 	return P
 end
@@ -716,12 +723,22 @@ end
 	A = S' * F' * M * F * S, i.e. the PSF without the projection.
 	Note that M can be a low-rank mixing, i.e. this acts on a vector
 	in temporal low-rank image space.
-
+	A cannot be in place
+	Asslander2017
 """
-function plan_psf_regularised(A::HermitianOperator{T}, P::HermitianOperator{T}, ρ::Real) where T <: Number
+function plan_psf_regularised(A::AbstractLinearOperator{T}, P::HermitianOperator{T}; ρ::Real=1e-3) where T <: Complex
+	# TODO: same as in admm(), HermitianOperator for A
 	Ar = HermitianOperator{T}(
 		size(A, 1),
-		x -> A*x + ρ * (x - P*x)
+		(y, x) -> begin
+			# Compute Ax + ρ⋅(x - Px)
+			xp = P * x
+			@. xp = ρ * (x - xp)
+			z = A * x
+			@. y = z + xp
+			y
+		end;
+		out=Vector{T}(undef, size(A, 1))
 	)
 	return Ar
 end
@@ -744,50 +761,57 @@ function matching_closure(
 	num_σ = size(D, 2)
 	match(x::NTuple{1, AbstractMatrix{<: Number}}) = MRFingerprinting.match(D, x[1], indices, stride, step)
 	match(x::NTuple{2, AbstractMatrix{<: Number}}) = MRFingerprinting.match(D, x, indices, stride, step)
-	return function match(x::AbstractVector{<: Number}...)
-		x = reshape.(x, num_f, num_σ)
-		x = transpose.(x)
-		matches, overlap = match(x)
-		return matches
-	end
+	matches = zeros(Int, num_f)
+	return (
+		function match(x::AbstractVector{<: Number}...)
+			x = reshape.(x, num_f, num_σ)
+			x = transpose.(x)
+			matches, overlap = match(x)
+			return matches
+		end,
+		matches
+	)
 end
 
 
 
-"""
-"""
 function admm(
 	b::AbstractVector{T}, # vec([spatial dimensions, singular component])
-	A::HermitianOperator{T}, # PSF
-	Ar::HermitianOperator{T}, # PSF regularised
+	A::AbstractLinearOperator{T}, # PSF
+	Ar::AbstractLinearOperator{T}, # PSF regularised
 	P::HermitianOperator{T},
-	ρ::Real, # Weighting of dictionary regularisation term, in theory the weighting is ρ/2, but here just ρ is used!
-	matches::AbstractVector{<: Integer}, # is modified
 	match::Function, # Must support match(x) and match(x,y)
-	maxiter::Integer, # 48
-	cg_maxiter # 64
+	matches::AbstractVector{<: Integer};
+	ρ::Real=1e-3, # Weighting of dictionary regularisation term, in theory the weighting is ρ/2, but here just ρ is used!
+	maxiter::Integer=10,
+	cg_maxiter::Integer=20,
 ) where T <: Complex
+	# TODO: check that A and Ar are hermitian, how could this be done? Check in LinearOperators.jl, if something like A' == A can be recognised
+	# Otherwise need to join functions instead of operators, i.e. there is no such thing as composite operator. Then however memory management is difficult
 	@assert maxiter > 0
 	# Do it specialised for MRF because P is not Vector in the implementation, but mathematically it is
 	# See Boyd2010
 
 	# First iteration with P = I, y = 0
-	error("use cg!() and init backproj? Check Asslaender paper")
-	x = cg(A, b, maxiter=cg_maxiter) # How many iterations here?
+	x = copy(b)
+	cg!(x, A, b, maxiter=cg_maxiter) # How many iterations here?
 	matches .= match(x)
-	y = x - P*x
+	# Project
+	y = x - P * x
 	# Allocate space
 	br = Vector{T}(undef, length(x))
 	# All other iterations
 	for i = 1:maxiter-1
 		# Construct right hand side of normal equations
-		br .= b .- ρ .* (y .- P*y)
+		p = P * y
+		@. br = b - ρ * (y - p)
 		# x
 		cg!(x, Ar, br, maxiter=cg_maxiter)
 		# P
 		matches .= match(x, y) # P is updated because it has pointer to `matches`
 		# y
-		y .+= x .- P * x
+		p = P * x
+		@. y += x - p
 		# Stopping criteria TODO: check Asslander's code
 	end
 	return x, y

@@ -3,6 +3,7 @@
 	closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
 
 Find indices of values in `target` (sorted) which are closest to arbitrarily valued parameters `params`.
+TODO: if zero, don't search
 """
 function closest(params::AbstractVector{<: Number}, target::AbstractVector{<: Number})
 	c = Vector{Int64}(undef, length(params))
@@ -174,7 +175,7 @@ function find_maximum_overlap!(
 	f_indices::AbstractVector{<: Integer},
 	d0::Integer
 )
-	@inbounds for (i, fi) in enumerate(f_indices)
+	@inbounds for (i, fi) in enumerate(f_indices) # TODO: here threads?
 		# iterate fingerprints in d
 		overlap_with_match = -Inf # This ensures that a valid matching index di is produced.
 		match_index = 0 # If a vector in f is zero, then the matching index will be 1
@@ -228,6 +229,8 @@ end
 	Define matching helper functions for
 	1) ||d ⋅ f||^2 and
 	2) ||d ⋅ f||^2 + 2Re{||g ⋅ d * d ⋅ f||}
+	See Asslander paper eq 20
+	Basically min||x + y - D'Dx||^2 = max ||Df||^2 + 2 Re{y' D'D x}
 =#
 
 # Helpers for matching with a whole dictionary

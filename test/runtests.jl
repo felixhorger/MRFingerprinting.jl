@@ -10,6 +10,20 @@ import PyPlot as plt
 import PyPlotTools
 
 
+
+# Projection
+MRF.plan_dictionary_projection(
+	DT_renorm::AbstractMatrix{<: Real},
+	matches::AbstractVector{<: Integer},
+	num_x::Integer,
+	num_σ::Integer;
+	dtype::Type{C}=ComplexF64,
+	out::AbstractVector{<: C}=empty(Vector{dtype})
+)
+
+
+
+
 # Testing closest()
 MRF.closest([2.0, 3.4], [2, 3, 4, 5]) # (2, 3), (3, 2)
 MRF.closest([(2.0, 2.0), (2.0, 3.5)], [(2.0, 2.0), (2., 4.), (3., 2.)]) # (2, 3), (3, 2)
